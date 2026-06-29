@@ -444,7 +444,7 @@ class MainWindow(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.signals.status_changed.emit("Stopping recording...")
-        threading.Thread(target=self.transcribe,daemon=True).start()
+        threading.Thread(target=self.process_recording,daemon=True).start()
 
     def record_speaker(self):
         try:
@@ -630,101 +630,110 @@ class MainWindow(QWidget):
 
         return blocks
 
-    def transcribe(self):
+    def _prepare_audio(self, output_dir):
+        errors = []
+        if self.speaker_error:
+            errors.append(f"Speaker/loopback: {self.speaker_error}")
+        elif not self.speaker_chunks:
+            errors.append("Speaker/loopback: no audio captured.")
+
+        if self.mic_error:
+            errors.append(f"Microphone: {self.mic_error}")
+        elif not self.mic_chunks:
+            errors.append("Microphone: no audio captured.")
+
+        if errors:
+            raise RuntimeError("\n".join(errors))
+
+        self.signals.status_changed.emit("Preparing audio...")
+
+        mixed = self.mix_audio(self.speaker_chunks, self.mic_chunks)
+        wav = output_dir / "mixed.wav"
+        sf.write(str(wav), mixed, SAMPLE_RATE)
+
+        self.speaker_chunks.clear()
+        self.mic_chunks.clear()
+
+        return wav
+
+    def _run_whisper_transcription(self, wav, output_dir):
+        waveform, sr = sf.read(str(wav), dtype="float32")
+
+        if waveform.ndim == 1:
+            waveform = waveform[np.newaxis, :]
+        else:
+            waveform = waveform.T
+
+        waveform = torch.from_numpy(waveform)
+
+        args = dict(
+            audio=str(wav),
+            beam_size=BEAM_SIZE,
+            vad_filter=VAD,
+            language=self.language,
+            word_timestamps=True,
+        )
+
+        self.signals.status_changed.emit("Transcribing...")
+        segments, _ = self.model.transcribe(**args)
+        segments = list(segments)
+
+        txt = output_dir / "transcript.txt"
+        with open(txt, "w", encoding="utf-8") as f:
+            for segment in segments:
+                if segment.text.strip():
+                    f.write(
+                        f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n"
+                    )
+
+        return segments, waveform, sr, txt
+
+    def _run_diarization(self, segments, waveform, sr, output_dir):
+        self.signals.status_changed.emit("Running speaker diarization...")
+        result = self.pyannote.get_pipeline()(
+            {
+                "waveform": waveform,
+                "sample_rate": sr,
+            }
+        )
+        speaker_segments = result.exclusive_speaker_diarization
+
+        del waveform
+
+        blocks = self.assign_speakers_to_words(segments, speaker_segments)
+
+        diarized_txt = output_dir / "transcript_diarized.txt"
+        with open(diarized_txt, "w", encoding="utf-8") as f:
+            for timestamp, speaker, text in blocks:
+                if not text.strip():
+                    continue
+                f.write(f"[{format_timestamp(timestamp)}] [{speaker}] {text}\n\n")
+
+        return diarized_txt
+
+    def process_recording(self):
         try:
-            ts=datetime.now().strftime("%Y%m%d_%H%M%S")
-            d=OUTPUT_DIR/ts
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            d = OUTPUT_DIR / ts
             d.mkdir(exist_ok=True)
-            wav=d/"mixed.wav"
-            txt=d/"transcript.txt"
-            diarized_txt=d/"transcript_diarized.txt"
 
-            errors=[]
-            if self.speaker_error:
-                errors.append(f"Speaker/loopback: {self.speaker_error}")
-            elif not self.speaker_chunks:
-                errors.append("Speaker/loopback: no audio captured.")
-
-            if self.mic_error:
-                errors.append(f"Microphone: {self.mic_error}")
-            elif not self.mic_chunks:
-                errors.append("Microphone: no audio captured.")
-
-            if errors:
-                raise RuntimeError("\n".join(errors))
-
-            self.signals.status_changed.emit("Preparing audio...")
-
-            mixed=self.mix_audio(self.speaker_chunks,self.mic_chunks)
-            sf.write(str(wav),mixed,SAMPLE_RATE)
-            
-            self.speaker_chunks.clear()
-            self.mic_chunks.clear()
+            wav = self._prepare_audio(d)
 
             if not self.enable_transcription:
-                del mixed
                 self.signals.status_changed.emit("Completed")
                 self.signals.finished.emit(str(d), str(wav))
                 return
 
-            # Carica il WAV con soundfile (evita TorchCodec)
-            waveform, sr = sf.read(str(wav), dtype="float32")
-
-            # Pyannote richiede (channels, samples)
-            if waveform.ndim == 1:
-                waveform = waveform[np.newaxis, :]
-            else:
-                waveform = waveform.T
-
-            waveform = torch.from_numpy(waveform)
-
-            args=dict(
-                audio=str(wav),
-                beam_size=BEAM_SIZE,
-                vad_filter=VAD,
-                language=self.language,
-                word_timestamps=True,
-            )
-
-            self.signals.status_changed.emit("Transcribing...")
-            segments,_=self.model.transcribe(**args)
-            segments=list(segments)
-
-            with open(txt,"w",encoding="utf-8") as f:
-                for segment in segments:
-                    if segment.text.strip():
-                        f.write(
-                            f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n"
-                        )
+            segments, waveform, sr, txt = self._run_whisper_transcription(wav, d)
 
             if not self.enable_diarization:
                 del waveform
-                del mixed
                 self.signals.finished.emit(str(d), str(txt))
                 return
 
-            self.signals.status_changed.emit("Running speaker diarization...")
-            result = self.pyannote.get_pipeline()(
-                {
-                    "waveform": waveform,
-                    "sample_rate": sr,
-                }
-            )
-            speaker_segments = result.exclusive_speaker_diarization
+            diarized_txt = self._run_diarization(segments, waveform, sr, d)
 
-            # Libera memoria
-            del waveform
-            del mixed
-
-            blocks = self.assign_speakers_to_words(segments, speaker_segments)
-
-            with open(diarized_txt,"w",encoding="utf-8") as f:
-                for timestamp, speaker, text in blocks:
-                    if not text.strip():
-                        continue
-                    f.write(f"[{format_timestamp(timestamp)}] [{speaker}] {text}\n\n")
-
-            self.signals.finished.emit(str(d),str(diarized_txt))
+            self.signals.finished.emit(str(d), str(diarized_txt))
         except Exception as e:
             print(f"[Transcription] {type(e).__name__}: {e}")
             traceback.print_exc()
