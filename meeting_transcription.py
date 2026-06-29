@@ -231,8 +231,6 @@ class MainWindow(QWidget):
         self.mic_error = None
         self.speaker_thread=None
         self.mic_thread=None
-        self.language = None
-        self.pyannote_ready = False
 
         self.status_label=QLabel("Loading Whisper...")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -358,7 +356,6 @@ class MainWindow(QWidget):
                         raise RuntimeError("Pyannote setup timeout")
                     if not self._pyannote_setup_result:
                         self.signals.status_changed.emit("Pyannote initialization cancelled")
-                        self.pyannote_ready = False
                         return False
             else:
                 self._pyannote_setup_event.clear()
@@ -367,16 +364,13 @@ class MainWindow(QWidget):
                     raise RuntimeError("Pyannote setup timeout")
                 if not self._pyannote_setup_result:
                     self.signals.status_changed.emit("Pyannote initialization cancelled")
-                    self.pyannote_ready = False
                     return False
         try:
             self.pyannote.get_pipeline()
         except Exception as e:
             self.signals.messagebox_requested.emit("critical", "Pyannote Error", str(e))
             self.signals.status_changed.emit("Pyannote initialization failed")
-            self.pyannote_ready = False
             return False
-        self.pyannote_ready = True
         self.signals.status_changed.emit("Ready")
         return True
 
@@ -421,9 +415,6 @@ class MainWindow(QWidget):
         self.stop_event = threading.Event()
         self.stop_event.clear()
         self.start_time=time.monotonic()
-        self.language = self.language_combo.currentData()
-        self.enable_transcription = self.transcribe_checkbox.isChecked()
-        self.enable_diarization = self.diarization_checkbox.isChecked()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.language_combo.setEnabled(False)
@@ -444,7 +435,14 @@ class MainWindow(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.signals.status_changed.emit("Stopping recording...")
-        threading.Thread(target=self._process_recording,daemon=True).start()
+        language = self.language_combo.currentData()
+        enable_transcription = self.transcribe_checkbox.isChecked()
+        enable_diarization = self.diarization_checkbox.isChecked()
+        threading.Thread(
+            target=self._process_recording,
+            args=(language, enable_transcription, enable_diarization),
+            daemon=True,
+        ).start()
 
     def _record_speaker(self):
         try:
@@ -656,12 +654,12 @@ class MainWindow(QWidget):
         sf.write(str(wav), mixed, SAMPLE_RATE)
         return wav
 
-    def _run_whisper_transcription(self, wav, output_dir):
+    def _run_whisper_transcription(self, wav, output_dir, language):
         args = dict(
             audio=str(wav),
             beam_size=BEAM_SIZE,
             vad_filter=VAD,
-            language=self.language,
+            language=language,
             word_timestamps=True,
         )
 
@@ -714,7 +712,7 @@ class MainWindow(QWidget):
 
         return diarized_txt
 
-    def _process_recording(self):
+    def _process_recording(self, language, enable_transcription, enable_diarization):
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             d = OUTPUT_DIR / ts
@@ -722,14 +720,14 @@ class MainWindow(QWidget):
 
             wav = self._create_wav(d)
 
-            if not self.enable_transcription:
+            if not enable_transcription:
                 self.signals.status_changed.emit("Completed")
                 self.signals.finished.emit(str(d), str(wav))
                 return
 
-            segments, txt = self._run_whisper_transcription(wav, d)
+            segments, txt = self._run_whisper_transcription(wav, d, language)
 
-            if not self.enable_diarization:
+            if not enable_diarization:
                 self.signals.finished.emit(str(d), str(txt))
                 return
 
