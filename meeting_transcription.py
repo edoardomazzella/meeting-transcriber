@@ -682,7 +682,7 @@ class MainWindow(QWidget):
 
         return segments, txt
 
-    def _run_diarization(self, segments, wav, output_dir):
+    def _run_diarization(self, wav):
         waveform, sr = sf.read(str(wav), dtype="float32")
 
         if waveform.ndim == 1:
@@ -703,6 +703,9 @@ class MainWindow(QWidget):
 
         del waveform
 
+        return speaker_segments
+
+    def _save_diarized_transcript(self, segments, speaker_segments, output_dir):
         blocks = self._assign_speakers_to_words(segments, speaker_segments)
 
         diarized_txt = output_dir / "transcript_diarized.txt"
@@ -734,7 +737,8 @@ class MainWindow(QWidget):
                 self.signals.finished.emit(str(d), str(txt))
                 return
 
-            diarized_txt = self._run_diarization(segments, wav, d)
+            speaker_segments = self._run_diarization(wav)
+            diarized_txt = self._save_diarized_transcript(segments, speaker_segments, d)
 
             self.signals.finished.emit(str(d), str(diarized_txt))
         except Exception as e:
