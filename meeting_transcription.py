@@ -251,6 +251,7 @@ class MainWindow(QWidget):
         self.language_combo.addItem("Auto-detect", None)
         self.language_combo.addItem("Italian", "it")
         self.language_combo.addItem("English", "en")
+        self.language_combo.addItem("French", "fr")
         self.language_combo.setEnabled(False)
         self.start_button=QPushButton("Start Recording")
         self.stop_button=QPushButton("Stop Recording")
