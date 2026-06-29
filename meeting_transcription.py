@@ -630,7 +630,7 @@ class MainWindow(QWidget):
 
         return blocks
 
-    def _prepare_audio(self):
+    def _create_wav(self, output_dir):
         errors = []
         if self.speaker_error:
             errors.append(f"Speaker/loopback: {self.speaker_error}")
@@ -652,9 +652,6 @@ class MainWindow(QWidget):
         self.speaker_chunks.clear()
         self.mic_chunks.clear()
 
-        return mixed
-
-    def _save_wav(self, mixed, output_dir):
         wav = output_dir / "mixed.wav"
         sf.write(str(wav), mixed, SAMPLE_RATE)
         return wav
@@ -723,8 +720,7 @@ class MainWindow(QWidget):
             d = OUTPUT_DIR / ts
             d.mkdir(exist_ok=True)
 
-            mixed = self._prepare_audio()
-            wav = self._save_wav(mixed, d)
+            wav = self._create_wav(d)
 
             if not self.enable_transcription:
                 self.signals.status_changed.emit("Completed")
