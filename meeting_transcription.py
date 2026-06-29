@@ -630,7 +630,7 @@ class MainWindow(QWidget):
 
         return blocks
 
-    def _prepare_audio(self, output_dir):
+    def _prepare_audio(self):
         errors = []
         if self.speaker_error:
             errors.append(f"Speaker/loopback: {self.speaker_error}")
@@ -648,12 +648,15 @@ class MainWindow(QWidget):
         self.signals.status_changed.emit("Preparing audio...")
 
         mixed = self._mix_audio(self.speaker_chunks, self.mic_chunks)
-        wav = output_dir / "mixed.wav"
-        sf.write(str(wav), mixed, SAMPLE_RATE)
 
         self.speaker_chunks.clear()
         self.mic_chunks.clear()
 
+        return mixed
+
+    def _save_wav(self, mixed, output_dir):
+        wav = output_dir / "mixed.wav"
+        sf.write(str(wav), mixed, SAMPLE_RATE)
         return wav
 
     def _run_whisper_transcription(self, wav, output_dir):
@@ -717,7 +720,8 @@ class MainWindow(QWidget):
             d = OUTPUT_DIR / ts
             d.mkdir(exist_ok=True)
 
-            wav = self._prepare_audio(d)
+            mixed = self._prepare_audio()
+            wav = self._save_wav(mixed, d)
 
             if not self.enable_transcription:
                 self.signals.status_changed.emit("Completed")
