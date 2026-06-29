@@ -124,7 +124,7 @@ class PyannoteManager:
                 self.delete_token()
             raise
 
-    def initialize_pipeline(self):
+    def _initialize_pipeline(self):
         if self.pipeline is not None:
             return self.pipeline
 
@@ -146,7 +146,7 @@ class PyannoteManager:
 
     def get_pipeline(self):
         if self.pipeline is None:
-            return self.initialize_pipeline()
+            return self._initialize_pipeline()
         return self.pipeline
 
 class PyannoteSetupDialog(QDialog):
@@ -194,10 +194,10 @@ class PyannoteSetupDialog(QDialog):
         layout.addWidget(self.token_edit)
 
         self.download_button = QPushButton("Download Models")
-        self.download_button.clicked.connect(self.download_models)
+        self.download_button.clicked.connect(self._on_download_clicked)
         layout.addWidget(self.download_button)
 
-    def download_models(self):
+    def _on_download_clicked(self):
         token = self.token_edit.text().strip()
         if not token:
             QMessageBox.warning(self, "Missing token", "Please enter a Hugging Face access token.")
@@ -243,7 +243,7 @@ class MainWindow(QWidget):
         self.language_combo=QComboBox()
         self.transcribe_checkbox=QCheckBox("Transcribe")
         self.transcribe_checkbox.setChecked(True)
-        self.transcribe_checkbox.toggled.connect(self.on_transcribe_toggled)
+        self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
         self.diarization_checkbox=QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setChecked(True)
         self.language_combo.addItem("Italian", "it")
@@ -253,8 +253,8 @@ class MainWindow(QWidget):
         self.stop_button.setEnabled(False)
         self.start_button.setEnabled(False)
 
-        self.start_button.clicked.connect(self.start_recording)
-        self.stop_button.clicked.connect(self.stop_recording)
+        self.start_button.clicked.connect(self._start_recording)
+        self.stop_button.clicked.connect(self._stop_recording)
 
         lay=QVBoxLayout(self)
         lay.addWidget(self.status_label)
@@ -267,21 +267,21 @@ class MainWindow(QWidget):
         lay.addWidget(self.stop_button)
 
         self.signals.status_changed.connect(self.status_label.setText)
-        self.signals.finished.connect(self.transcription_finished)
-        self.signals.error.connect(self.transcription_error)
-        self.signals.model_ready.connect(self.model_ready)
-        self.signals.pyannote_setup_requested.connect(self.show_pyannote_setup_dialog)
+        self.signals.finished.connect(self._on_transcription_finished)
+        self.signals.error.connect(self._on_transcription_error)
+        self.signals.model_ready.connect(self._on_model_ready)
+        self.signals.pyannote_setup_requested.connect(self._on_pyannote_setup_requested)
         self._pyannote_setup_event = threading.Event()
         self._pyannote_setup_result = False
-        self.signals.messagebox_requested.connect(self.show_messagebox)
+        self.signals.messagebox_requested.connect(self._on_messagebox_requested)
 
-        threading.Thread(target=self.load_model, daemon=True).start()
+        threading.Thread(target=self._load_model, daemon=True).start()
 
         self.timer=QTimer()
-        self.timer.timeout.connect(self.update_duration)
+        self.timer.timeout.connect(self._update_duration)
         self.timer.start(1000)
 
-    def load_model(self):
+    def _load_model(self):
         model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
         if model_cache.exists():
             self.signals.status_changed.emit(f"Loading model ({MODEL_SIZE})...")
@@ -308,7 +308,7 @@ class MainWindow(QWidget):
                 compute_type="float16",
                 download_root=str(MODEL_DIR),
             )
-            ok = self.initialize_pyannote()
+            ok = self._initialize_pyannote()
             self.signals.model_ready.emit(ok)
             return
 
@@ -334,14 +334,14 @@ class MainWindow(QWidget):
                 compute_type="int8",
                 download_root=str(MODEL_DIR),
             )
-            ok = self.initialize_pyannote()
+            ok = self._initialize_pyannote()
             self.signals.model_ready.emit(ok)
         except Exception as e:
             print(f"[Whisper CPU] {e}")
             traceback.print_exc()
             self.signals.error.emit(message or f"Unable to load the Whisper model.\n\n{e}")
 
-    def initialize_pyannote(self):
+    def _initialize_pyannote(self):
         self.signals.status_changed.emit("Loading Pyannote...")
         if not self.pyannote.models_exist():
             if self.pyannote.token_exists():
@@ -380,11 +380,11 @@ class MainWindow(QWidget):
         self.signals.status_changed.emit("Ready")
         return True
 
-    def model_ready(self, success):
+    def _on_model_ready(self, success):
         self.start_button.setEnabled(success)
         self.language_combo.setEnabled(success)
 
-    def show_pyannote_setup_dialog(self):
+    def _on_pyannote_setup_requested(self):
         try:
             dlg = PyannoteSetupDialog(self.pyannote, self)
             self._pyannote_setup_result = (dlg.exec() == QDialog.Accepted)
@@ -394,7 +394,7 @@ class MainWindow(QWidget):
         finally:
             self._pyannote_setup_event.set()
 
-    def show_messagebox(self, kind, title, message):
+    def _on_messagebox_requested(self, kind, title, message):
         if kind == "critical":
             QMessageBox.critical(self, title, message)
         elif kind == "warning":
@@ -402,17 +402,17 @@ class MainWindow(QWidget):
         else:
             QMessageBox.information(self, title, message)
 
-    def on_transcribe_toggled(self, checked):
+    def _on_transcribe_toggled(self, checked):
         self.diarization_checkbox.setEnabled(checked)
         if not checked:
             self.diarization_checkbox.setChecked(False)
 
-    def update_duration(self):
+    def _update_duration(self):
         if self.recording and self.start_time:
             e=int(time.monotonic()-self.start_time)
             self.duration_label.setText(f"{e//3600:02}:{(e%3600)//60:02}:{e%60:02}")
 
-    def start_recording(self):
+    def _start_recording(self):
         self.speaker_chunks=[]
         self.mic_chunks=[]
         self.speaker_error = None
@@ -430,12 +430,12 @@ class MainWindow(QWidget):
         self.transcribe_checkbox.setEnabled(False)
         self.diarization_checkbox.setEnabled(False)
         self.signals.status_changed.emit("Recording...")
-        self.speaker_thread=threading.Thread(target=self.record_speaker,daemon=True)
-        self.mic_thread=threading.Thread(target=self.record_microphone,daemon=True)
+        self.speaker_thread=threading.Thread(target=self._record_speaker,daemon=True)
+        self.mic_thread=threading.Thread(target=self._record_microphone,daemon=True)
         self.speaker_thread.start()
         self.mic_thread.start()
 
-    def stop_recording(self):
+    def _stop_recording(self):
         self.recording=False
         self.stop_event.set()
         for t in (self.speaker_thread,self.mic_thread):
@@ -444,9 +444,9 @@ class MainWindow(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.signals.status_changed.emit("Stopping recording...")
-        threading.Thread(target=self.process_recording,daemon=True).start()
+        threading.Thread(target=self._process_recording,daemon=True).start()
 
-    def record_speaker(self):
+    def _record_speaker(self):
         try:
             sp=sc.default_speaker()
             
@@ -464,7 +464,7 @@ class MainWindow(QWidget):
             self.speaker_error = str(e)
             traceback.print_exc()
 
-    def record_microphone(self):
+    def _record_microphone(self):
         try:
             mic=sc.default_microphone()
             
@@ -481,7 +481,7 @@ class MainWindow(QWidget):
             self.mic_error = str(e)
             traceback.print_exc()
 
-    def mix_audio(self,speaker_chunks,mic_chunks):
+    def _mix_audio(self,speaker_chunks,mic_chunks):
         sp=np.concatenate(speaker_chunks) if speaker_chunks else np.zeros(0,np.float32)
         mic=np.concatenate(mic_chunks) if mic_chunks else np.zeros(0,np.float32)
 
@@ -500,7 +500,7 @@ class MainWindow(QWidget):
         
         return np.clip(mixed,-1,1)
 
-    def find_best_speaker(self, speaker_segments, start, end):
+    def _find_best_speaker(self, speaker_segments, start, end):
         if speaker_segments is None:
             return None
 
@@ -525,7 +525,7 @@ class MainWindow(QWidget):
 
         return None
 
-    def assign_speakers_to_words(self, segments, speaker_segments):
+    def _assign_speakers_to_words(self, segments, speaker_segments):
         words = []
         last_speaker = None
         HYSTERESIS_MARGIN = 0.20  # 20%
@@ -541,7 +541,7 @@ class MainWindow(QWidget):
                 if start is None or end is None:
                     continue
 
-                speaker = self.find_best_speaker(speaker_segments, start, end)
+                speaker = self._find_best_speaker(speaker_segments, start, end)
                 if speaker is None:
                     speaker = "UNKNOWN"
 
@@ -647,7 +647,7 @@ class MainWindow(QWidget):
 
         self.signals.status_changed.emit("Preparing audio...")
 
-        mixed = self.mix_audio(self.speaker_chunks, self.mic_chunks)
+        mixed = self._mix_audio(self.speaker_chunks, self.mic_chunks)
         wav = output_dir / "mixed.wav"
         sf.write(str(wav), mixed, SAMPLE_RATE)
 
@@ -700,7 +700,7 @@ class MainWindow(QWidget):
 
         del waveform
 
-        blocks = self.assign_speakers_to_words(segments, speaker_segments)
+        blocks = self._assign_speakers_to_words(segments, speaker_segments)
 
         diarized_txt = output_dir / "transcript_diarized.txt"
         with open(diarized_txt, "w", encoding="utf-8") as f:
@@ -711,7 +711,7 @@ class MainWindow(QWidget):
 
         return diarized_txt
 
-    def process_recording(self):
+    def _process_recording(self):
         try:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             d = OUTPUT_DIR / ts
@@ -739,7 +739,7 @@ class MainWindow(QWidget):
             traceback.print_exc()
             self.signals.error.emit(traceback.format_exc())
 
-    def transcription_finished(self,folder,file):
+    def _on_transcription_finished(self,folder,file):
         self.status_label.setText("Completed")
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
@@ -749,7 +749,7 @@ class MainWindow(QWidget):
         self.diarization_checkbox.setEnabled(True)
         QMessageBox.information(self,"Completed",f"Folder:\n{folder}\n\nTranscript:\n{file}")
 
-    def transcription_error(self,message):
+    def _on_transcription_error(self,message):
         self.status_label.setText("Error")
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
