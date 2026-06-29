@@ -68,6 +68,7 @@ class Signals(QObject):
     error = Signal(str)
     whisper_ready = Signal(bool)
     pyannote_ready = Signal(bool)
+    whisper_setup_requested = Signal()
     pyannote_setup_requested = Signal()
     pyannote_setup_finished = Signal(bool)
     messagebox_requested = Signal(str, str, str)
@@ -272,6 +273,9 @@ class MainWindow(QWidget):
         self.signals.error.connect(self._on_transcription_error)
         self.signals.whisper_ready.connect(self._on_whisper_ready)
         self.signals.pyannote_ready.connect(self._on_pyannote_ready)
+        self.signals.whisper_setup_requested.connect(self._on_whisper_setup_requested)
+        self._whisper_setup_event = threading.Event()
+        self._whisper_setup_result = False
         self.signals.pyannote_setup_requested.connect(self._on_pyannote_setup_requested)
         self._pyannote_setup_event = threading.Event()
         self._pyannote_setup_result = False
@@ -284,7 +288,14 @@ class MainWindow(QWidget):
         self.timer.start(1000)
 
     def _load_model(self):
-        if self._is_whisper_installed():
+        should_load_whisper = self._is_whisper_installed()
+        if not should_load_whisper:
+            self._whisper_setup_event.clear()
+            self.signals.whisper_setup_requested.emit()
+            self._whisper_setup_event.wait()
+            should_load_whisper = self._whisper_setup_result
+
+        if should_load_whisper:
             try:
                 self._load_whisper()
                 self.signals.whisper_ready.emit(True)
@@ -416,6 +427,19 @@ class MainWindow(QWidget):
         if not can_diarize:
             self.diarization_checkbox.setChecked(False)
         self.diarization_checkbox.setEnabled(can_diarize)
+
+    def _on_whisper_setup_requested(self):
+        reply = QMessageBox.question(
+            self,
+            "Whisper not installed",
+            f"The Whisper model ({MODEL_SIZE}) is not installed.\n\n"
+            "Do you want to download it now?\n\n"
+            "Note: the download may take several minutes.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        self._whisper_setup_result = (reply == QMessageBox.Yes)
+        self._whisper_setup_event.set()
 
     def _on_pyannote_setup_requested(self):
         try:
