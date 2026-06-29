@@ -220,23 +220,50 @@ class PyannoteSetupDialog(QDialog):
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400, 310)
+
+        # ── 1. Signals object (needed before any other init) ─────────────────
         self.signals = Signals()
-        self.recording=False
-        self.start_time=None
-        self.model=None
-        self.pyannote=PyannoteManager(MODEL_DIR)
-        self.speaker_chunks=[]
-        self.mic_chunks=[]
+
+        # ── 2. All instance-variable state (must be complete before the
+        #        background thread starts, because signals emitted from that
+        #        thread can cause _update_controls() to read every attribute
+        #        listed here as soon as the Qt event loop processes them) ──────
+        self.recording = False
+        self.start_time = None
+        self.model = None
+        self.pyannote = PyannoteManager(MODEL_DIR)
+        self.speaker_chunks = []
+        self.mic_chunks = []
         self.speaker_error = None
         self.mic_error = None
-        self.speaker_thread=None
-        self.mic_thread=None
+        self.speaker_thread = None
+        self.mic_thread = None
+
+        # Model-readiness flags (read by _update_controls via whisper_ready /
+        # pyannote_ready signals that the background thread emits)
         self.whisper_ready = False
         self.pyannote_ready = False
-        self._whisper_installing = False
 
+        # Install-in-progress flags (read by _update_controls; must be
+        # initialized here — NOT lazily in the click handlers)
+        self._whisper_installing = False
+        self._pyannote_installing = False
+
+        # True while the initial startup load is checking/loading Pyannote.
+        # Keeps the Install button hidden until we know pyannote's real state.
+        self._pyannote_loading = True
+
+        # Threading events for the signal→dialog→thread handshake
+        self._whisper_setup_event = threading.Event()
+        self._whisper_setup_result = False
+        self._pyannote_setup_event = threading.Event()
+        self._pyannote_setup_result = False
+
+        # ── 3. Window geometry ───────────────────────────────────────────────
+        self.setWindowTitle("Meeting Transcriber")
+        self.setFixedSize(400, 340)
+
+        # ── 4. Widgets ───────────────────────────────────────────────────────
         self.status_label=QLabel("Loading Whisper...")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.duration_label=QLabel("00:00:00")
@@ -258,12 +285,17 @@ class MainWindow(QWidget):
         self.stop_button=QPushButton("Stop Recording")
         self.install_whisper_button=QPushButton("Install Whisper...")
         self.install_whisper_button.setEnabled(False)
+        self.install_pyannote_button=QPushButton("Install Pyannote...")
+        self.install_pyannote_button.setEnabled(False)
         self.stop_button.setEnabled(False)
 
+        # ── 5. Button connections ────────────────────────────────────────────
         self.start_button.clicked.connect(self._start_recording)
         self.stop_button.clicked.connect(self._stop_recording)
         self.install_whisper_button.clicked.connect(self._on_install_whisper_clicked)
+        self.install_pyannote_button.clicked.connect(self._on_install_pyannote_clicked)
 
+        # ── 6. Layout ────────────────────────────────────────────────────────
         lay=QVBoxLayout(self)
         lay.addWidget(self.status_label)
         lay.addWidget(self.duration_label)
@@ -272,22 +304,21 @@ class MainWindow(QWidget):
         lay.addWidget(self.transcribe_checkbox)
         lay.addWidget(self.diarization_checkbox)
         lay.addWidget(self.install_whisper_button)
+        lay.addWidget(self.install_pyannote_button)
         lay.addWidget(self.start_button)
         lay.addWidget(self.stop_button)
 
+        # ── 7. Signal connections ────────────────────────────────────────────
         self.signals.status_changed.connect(self.status_label.setText)
         self.signals.finished.connect(self._on_transcription_finished)
         self.signals.error.connect(self._on_transcription_error)
         self.signals.whisper_ready.connect(self._on_whisper_ready)
         self.signals.pyannote_ready.connect(self._on_pyannote_ready)
         self.signals.whisper_setup_requested.connect(self._on_whisper_setup_requested)
-        self._whisper_setup_event = threading.Event()
-        self._whisper_setup_result = False
         self.signals.pyannote_setup_requested.connect(self._on_pyannote_setup_requested)
-        self._pyannote_setup_event = threading.Event()
-        self._pyannote_setup_result = False
         self.signals.messagebox_requested.connect(self._on_messagebox_requested)
 
+        # ── 8. Background thread — LAST, after every attribute is set ────────
         threading.Thread(target=self._load_model, daemon=True).start()
 
         self.timer=QTimer()
@@ -429,6 +460,7 @@ class MainWindow(QWidget):
 
     def _on_pyannote_ready(self, success):
         self.pyannote_ready = success
+        self._pyannote_loading = False
         self._update_controls()
 
     def _update_controls(self):
@@ -444,6 +476,13 @@ class MainWindow(QWidget):
             not self.whisper_ready
             and not self.recording
             and not self._whisper_installing
+        )
+        self.install_pyannote_button.setEnabled(
+            self.whisper_ready
+            and not self.pyannote_ready
+            and not self.recording
+            and not self._pyannote_installing
+            and not self._pyannote_loading
         )
 
     def _on_install_whisper_clicked(self):
@@ -467,6 +506,16 @@ class MainWindow(QWidget):
         else:
             self._whisper_installing = False
             self.signals.whisper_ready.emit(False)
+
+    def _on_install_pyannote_clicked(self):
+        self._pyannote_installing = True
+        self._update_controls()
+        threading.Thread(target=self._run_pyannote_install, daemon=True).start()
+
+    def _run_pyannote_install(self):
+        ok = self._initialize_pyannote()
+        self._pyannote_installing = False
+        self.signals.pyannote_ready.emit(ok)
 
     def _on_whisper_setup_requested(self):
         reply = QMessageBox.question(
