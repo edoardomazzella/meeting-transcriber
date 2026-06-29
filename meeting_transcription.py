@@ -295,17 +295,23 @@ class MainWindow(QWidget):
             self._whisper_setup_event.wait()
             should_load_whisper = self._whisper_setup_result
 
+        whisper_ok = False
         if should_load_whisper:
             try:
                 self._load_whisper()
                 self.signals.whisper_ready.emit(True)
+                whisper_ok = True
             except Exception as e:
                 self.signals.whisper_ready.emit(False)
                 self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
         else:
             self.signals.whisper_ready.emit(False)
-        ok = self._initialize_pyannote()
-        self.signals.pyannote_ready.emit(ok)
+
+        if whisper_ok:
+            ok = self._initialize_pyannote()
+            self.signals.pyannote_ready.emit(ok)
+        else:
+            self.signals.pyannote_ready.emit(False)
 
     def _is_whisper_installed(self):
         model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
