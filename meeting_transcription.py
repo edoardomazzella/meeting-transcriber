@@ -221,7 +221,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400,280)
+        self.setFixedSize(400, 310)
         self.signals = Signals()
         self.recording=False
         self.start_time=None
@@ -235,6 +235,7 @@ class MainWindow(QWidget):
         self.mic_thread=None
         self.whisper_ready = False
         self.pyannote_ready = False
+        self._whisper_installing = False
 
         self.status_label=QLabel("Loading Whisper...")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -255,10 +256,13 @@ class MainWindow(QWidget):
         self.language_combo.setEnabled(False)
         self.start_button=QPushButton("Start Recording")
         self.stop_button=QPushButton("Stop Recording")
+        self.install_whisper_button=QPushButton("Install Whisper...")
+        self.install_whisper_button.setEnabled(False)
         self.stop_button.setEnabled(False)
 
         self.start_button.clicked.connect(self._start_recording)
         self.stop_button.clicked.connect(self._stop_recording)
+        self.install_whisper_button.clicked.connect(self._on_install_whisper_clicked)
 
         lay=QVBoxLayout(self)
         lay.addWidget(self.status_label)
@@ -267,6 +271,7 @@ class MainWindow(QWidget):
         lay.addWidget(self.language_combo)
         lay.addWidget(self.transcribe_checkbox)
         lay.addWidget(self.diarization_checkbox)
+        lay.addWidget(self.install_whisper_button)
         lay.addWidget(self.start_button)
         lay.addWidget(self.stop_button)
 
@@ -435,6 +440,33 @@ class MainWindow(QWidget):
         if not can_diarize:
             self.diarization_checkbox.setChecked(False)
         self.diarization_checkbox.setEnabled(can_diarize)
+        self.install_whisper_button.setEnabled(
+            not self.whisper_ready
+            and not self.recording
+            and not self._whisper_installing
+        )
+
+    def _on_install_whisper_clicked(self):
+        self._whisper_installing = True
+        self._update_controls()
+        threading.Thread(target=self._run_whisper_install, daemon=True).start()
+
+    def _run_whisper_install(self):
+        self._whisper_setup_event.clear()
+        self.signals.whisper_setup_requested.emit()
+        self._whisper_setup_event.wait()
+        if self._whisper_setup_result:
+            try:
+                self._load_whisper()
+                self._whisper_installing = False
+                self.signals.whisper_ready.emit(True)
+            except Exception as e:
+                self._whisper_installing = False
+                self.signals.whisper_ready.emit(False)
+                self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
+        else:
+            self._whisper_installing = False
+            self.signals.whisper_ready.emit(False)
 
     def _on_whisper_setup_requested(self):
         reply = QMessageBox.question(
