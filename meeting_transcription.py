@@ -248,6 +248,7 @@ class MainWindow(QWidget):
         self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
         self.diarization_checkbox=QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setEnabled(False)
+        self.language_combo.addItem("Auto-detect", None)
         self.language_combo.addItem("Italian", "it")
         self.language_combo.addItem("English", "en")
         self.language_combo.setEnabled(False)
@@ -726,9 +727,10 @@ class MainWindow(QWidget):
             audio=str(wav),
             beam_size=BEAM_SIZE,
             vad_filter=VAD,
-            language=language,
             word_timestamps=True,
         )
+        if language:
+            args["language"] = language
 
         self.signals.status_changed.emit("Transcribing...")
         segments, _ = self.model.transcribe(**args)
