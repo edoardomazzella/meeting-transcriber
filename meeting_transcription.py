@@ -66,7 +66,8 @@ class Signals(QObject):
     status_changed = Signal(str)
     finished = Signal(str, str)
     error = Signal(str)
-    model_ready = Signal(bool)
+    whisper_ready = Signal(bool)
+    pyannote_ready = Signal(bool)
     pyannote_setup_requested = Signal()
     pyannote_setup_finished = Signal(bool)
     messagebox_requested = Signal(str, str, str)
@@ -231,6 +232,8 @@ class MainWindow(QWidget):
         self.mic_error = None
         self.speaker_thread=None
         self.mic_thread=None
+        self.whisper_ready = False
+        self.pyannote_ready = False
 
         self.status_label=QLabel("Loading Whisper...")
         self.status_label.setAlignment(Qt.AlignCenter)
@@ -240,16 +243,16 @@ class MainWindow(QWidget):
         self.language_label.setAlignment(Qt.AlignCenter)
         self.language_combo=QComboBox()
         self.transcribe_checkbox=QCheckBox("Transcribe")
-        self.transcribe_checkbox.setChecked(True)
+        self.transcribe_checkbox.setEnabled(False)
         self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
         self.diarization_checkbox=QCheckBox("Enable speaker diarization")
-        self.diarization_checkbox.setChecked(True)
+        self.diarization_checkbox.setEnabled(False)
         self.language_combo.addItem("Italian", "it")
         self.language_combo.addItem("English", "en")
+        self.language_combo.setEnabled(False)
         self.start_button=QPushButton("Start Recording")
         self.stop_button=QPushButton("Stop Recording")
         self.stop_button.setEnabled(False)
-        self.start_button.setEnabled(False)
 
         self.start_button.clicked.connect(self._start_recording)
         self.stop_button.clicked.connect(self._stop_recording)
@@ -267,7 +270,8 @@ class MainWindow(QWidget):
         self.signals.status_changed.connect(self.status_label.setText)
         self.signals.finished.connect(self._on_transcription_finished)
         self.signals.error.connect(self._on_transcription_error)
-        self.signals.model_ready.connect(self._on_model_ready)
+        self.signals.whisper_ready.connect(self._on_whisper_ready)
+        self.signals.pyannote_ready.connect(self._on_pyannote_ready)
         self.signals.pyannote_setup_requested.connect(self._on_pyannote_setup_requested)
         self._pyannote_setup_event = threading.Event()
         self._pyannote_setup_result = False
@@ -280,6 +284,16 @@ class MainWindow(QWidget):
         self.timer.start(1000)
 
     def _load_model(self):
+        try:
+            self._load_whisper()
+            self.signals.whisper_ready.emit(True)
+        except Exception as e:
+            self.signals.whisper_ready.emit(False)
+            self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
+        ok = self._initialize_pyannote()
+        self.signals.pyannote_ready.emit(ok)
+
+    def _load_whisper(self):
         model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
         if model_cache.exists():
             self.signals.status_changed.emit(f"Loading model ({MODEL_SIZE})...")
@@ -306,8 +320,6 @@ class MainWindow(QWidget):
                 compute_type="float16",
                 download_root=str(MODEL_DIR),
             )
-            ok = self._initialize_pyannote()
-            self.signals.model_ready.emit(ok)
             return
 
         except RuntimeError as e:
@@ -332,12 +344,10 @@ class MainWindow(QWidget):
                 compute_type="int8",
                 download_root=str(MODEL_DIR),
             )
-            ok = self._initialize_pyannote()
-            self.signals.model_ready.emit(ok)
         except Exception as e:
             print(f"[Whisper CPU] {e}")
             traceback.print_exc()
-            self.signals.error.emit(message or f"Unable to load the Whisper model.\n\n{e}")
+            raise RuntimeError(message or f"Unable to load the Whisper model.\n\n{e}")
 
     def _initialize_pyannote(self):
         self.signals.status_changed.emit("Loading Pyannote...")
@@ -374,9 +384,23 @@ class MainWindow(QWidget):
         self.signals.status_changed.emit("Ready")
         return True
 
-    def _on_model_ready(self, success):
-        self.start_button.setEnabled(success)
-        self.language_combo.setEnabled(success)
+    def _on_whisper_ready(self, success):
+        self.whisper_ready = success
+        self._update_controls()
+
+    def _on_pyannote_ready(self, success):
+        self.pyannote_ready = success
+        self._update_controls()
+
+    def _update_controls(self):
+        if not self.whisper_ready:
+            self.transcribe_checkbox.setChecked(False)
+        self.transcribe_checkbox.setEnabled(self.whisper_ready)
+        self.language_combo.setEnabled(self.whisper_ready)
+        can_diarize = self.whisper_ready and self.pyannote_ready and self.transcribe_checkbox.isChecked()
+        if not can_diarize:
+            self.diarization_checkbox.setChecked(False)
+        self.diarization_checkbox.setEnabled(can_diarize)
 
     def _on_pyannote_setup_requested(self):
         try:
@@ -397,9 +421,7 @@ class MainWindow(QWidget):
             QMessageBox.information(self, title, message)
 
     def _on_transcribe_toggled(self, checked):
-        self.diarization_checkbox.setEnabled(checked)
-        if not checked:
-            self.diarization_checkbox.setChecked(False)
+        self._update_controls()
 
     def _update_duration(self):
         if self.recording and self.start_time:
@@ -745,9 +767,7 @@ class MainWindow(QWidget):
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.language_combo.setEnabled(True)
-        self.transcribe_checkbox.setEnabled(True)
-        self.diarization_checkbox.setEnabled(True)
+        self._update_controls()
         QMessageBox.information(self,"Completed",f"Folder:\n{folder}\n\nTranscript:\n{file}")
 
     def _on_transcription_error(self,message):
@@ -755,12 +775,8 @@ class MainWindow(QWidget):
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.language_combo.setEnabled(True)
-        self.transcribe_checkbox.setEnabled(True)
-        self.diarization_checkbox.setEnabled(True)
+        self._update_controls()
         QMessageBox.critical(self,"Error",message)
-        if self.model is None:
-            self.close()
 
     def closeEvent(self, event):
         try:
