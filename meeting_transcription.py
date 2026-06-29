@@ -3,6 +3,7 @@
 import sys
 import threading
 import traceback
+import warnings
 from pathlib import Path
 from datetime import datetime
 import time
@@ -10,7 +11,6 @@ import os
 import webbrowser
 
 import numpy as np
-import soundcard as sc
 import soundfile as sf
 import torch
 
@@ -29,8 +29,13 @@ from PySide6.QtWidgets import (
     QDialog, QLineEdit, QCheckBox
 )
 
+import logging
+logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
+
 try:
-    from pyannote.audio import Pipeline
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
+        from pyannote.audio import Pipeline
 except Exception:
     Pipeline = None
 
@@ -603,6 +608,7 @@ class MainWindow(QWidget):
 
     def _record_speaker(self):
         try:
+            import soundcard as sc
             sp=sc.default_speaker()
             
             if sp is None:
@@ -621,6 +627,7 @@ class MainWindow(QWidget):
 
     def _record_microphone(self):
         try:
+            import soundcard as sc
             mic=sc.default_microphone()
             
             if mic is None:
