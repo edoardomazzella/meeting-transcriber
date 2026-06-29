@@ -284,14 +284,24 @@ class MainWindow(QWidget):
         self.timer.start(1000)
 
     def _load_model(self):
-        try:
-            self._load_whisper()
-            self.signals.whisper_ready.emit(True)
-        except Exception as e:
+        if self._is_whisper_installed():
+            try:
+                self._load_whisper()
+                self.signals.whisper_ready.emit(True)
+            except Exception as e:
+                self.signals.whisper_ready.emit(False)
+                self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
+        else:
             self.signals.whisper_ready.emit(False)
-            self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
         ok = self._initialize_pyannote()
         self.signals.pyannote_ready.emit(ok)
+
+    def _is_whisper_installed(self):
+        model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
+        return model_cache.exists()
+
+    def _is_pyannote_installed(self):
+        return self.pyannote.models_exist()
 
     def _load_whisper(self):
         model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
@@ -351,7 +361,7 @@ class MainWindow(QWidget):
 
     def _initialize_pyannote(self):
         self.signals.status_changed.emit("Loading Pyannote...")
-        if not self.pyannote.models_exist():
+        if not self._is_pyannote_installed():
             if self.pyannote.token_exists():
                 try:
                     self.signals.status_changed.emit("Downloading Pyannote models...")
@@ -375,6 +385,11 @@ class MainWindow(QWidget):
                 if not self._pyannote_setup_result:
                     self.signals.status_changed.emit("Pyannote initialization cancelled")
                     return False
+        if not self._is_pyannote_installed():
+            return False
+        return self._load_pyannote_pipeline()
+
+    def _load_pyannote_pipeline(self):
         try:
             self.pyannote.get_pipeline()
         except Exception as e:
