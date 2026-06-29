@@ -72,6 +72,7 @@ class Signals(QObject):
     pyannote_setup_requested = Signal()
     pyannote_setup_finished = Signal(bool)
     messagebox_requested = Signal(str, str, str)
+    initial_load_complete = Signal()
 
 class PyannoteManager:
     def __init__(self, base_dir):
@@ -287,6 +288,7 @@ class MainWindow(QWidget):
         self.install_whisper_button.setEnabled(False)
         self.install_pyannote_button=QPushButton("Install Pyannote...")
         self.install_pyannote_button.setEnabled(False)
+        self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
 
         # ── 5. Button connections ────────────────────────────────────────────
@@ -317,6 +319,7 @@ class MainWindow(QWidget):
         self.signals.whisper_setup_requested.connect(self._on_whisper_setup_requested)
         self.signals.pyannote_setup_requested.connect(self._on_pyannote_setup_requested)
         self.signals.messagebox_requested.connect(self._on_messagebox_requested)
+        self.signals.initial_load_complete.connect(self._on_initial_load_complete)
 
         # ── 8. Background thread — LAST, after every attribute is set ────────
         threading.Thread(target=self._load_model, daemon=True).start()
@@ -350,6 +353,7 @@ class MainWindow(QWidget):
             self.signals.pyannote_ready.emit(ok)
         else:
             self.signals.pyannote_ready.emit(False)
+        self.signals.initial_load_complete.emit()
 
     def _is_whisper_installed(self):
         model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
@@ -462,6 +466,9 @@ class MainWindow(QWidget):
         self.pyannote_ready = success
         self._pyannote_loading = False
         self._update_controls()
+
+    def _on_initial_load_complete(self):
+        self.start_button.setEnabled(True)
 
     def _update_controls(self):
         if not self.whisper_ready:
