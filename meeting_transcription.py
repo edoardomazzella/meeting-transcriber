@@ -660,15 +660,6 @@ class MainWindow(QWidget):
         return wav
 
     def _run_whisper_transcription(self, wav, output_dir):
-        waveform, sr = sf.read(str(wav), dtype="float32")
-
-        if waveform.ndim == 1:
-            waveform = waveform[np.newaxis, :]
-        else:
-            waveform = waveform.T
-
-        waveform = torch.from_numpy(waveform)
-
         args = dict(
             audio=str(wav),
             beam_size=BEAM_SIZE,
@@ -689,9 +680,18 @@ class MainWindow(QWidget):
                         f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n"
                     )
 
-        return segments, waveform, sr, txt
+        return segments, txt
 
-    def _run_diarization(self, segments, waveform, sr, output_dir):
+    def _run_diarization(self, segments, wav, output_dir):
+        waveform, sr = sf.read(str(wav), dtype="float32")
+
+        if waveform.ndim == 1:
+            waveform = waveform[np.newaxis, :]
+        else:
+            waveform = waveform.T
+
+        waveform = torch.from_numpy(waveform)
+
         self.signals.status_changed.emit("Running speaker diarization...")
         result = self.pyannote.get_pipeline()(
             {
@@ -728,14 +728,13 @@ class MainWindow(QWidget):
                 self.signals.finished.emit(str(d), str(wav))
                 return
 
-            segments, waveform, sr, txt = self._run_whisper_transcription(wav, d)
+            segments, txt = self._run_whisper_transcription(wav, d)
 
             if not self.enable_diarization:
-                del waveform
                 self.signals.finished.emit(str(d), str(txt))
                 return
 
-            diarized_txt = self._run_diarization(segments, waveform, sr, d)
+            diarized_txt = self._run_diarization(segments, wav, d)
 
             self.signals.finished.emit(str(d), str(diarized_txt))
         except Exception as e:
