@@ -26,7 +26,7 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QPalette, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
-    QVBoxLayout, QMessageBox, QComboBox,
+    QVBoxLayout, QHBoxLayout, QMessageBox, QComboBox,
     QDialog, QLineEdit, QCheckBox, QProgressBar, QFileDialog
 )
 
@@ -249,17 +249,25 @@ class AudioRecorder:
         self._stop_event = threading.Event()
         self._speaker_thread = None
         self._mic_thread = None
+        self._enable_speaker = True
+        self._enable_mic = True
 
-    def start(self):
+    def start(self, enable_speaker=True, enable_mic=True):
+        self._enable_speaker = enable_speaker
+        self._enable_mic = enable_mic
         self._speaker_chunks = []
         self._mic_chunks = []
         self.speaker_error = None
         self.mic_error = None
         self._stop_event = threading.Event()
-        self._speaker_thread = threading.Thread(target=self._record_speaker, daemon=True)
-        self._mic_thread = threading.Thread(target=self._record_microphone, daemon=True)
-        self._speaker_thread.start()
-        self._mic_thread.start()
+        self._speaker_thread = None
+        self._mic_thread = None
+        if enable_speaker:
+            self._speaker_thread = threading.Thread(target=self._record_speaker, daemon=True)
+            self._speaker_thread.start()
+        if enable_mic:
+            self._mic_thread = threading.Thread(target=self._record_microphone, daemon=True)
+            self._mic_thread.start()
 
     def stop(self):
         self._stop_event.set()
@@ -270,14 +278,16 @@ class AudioRecorder:
     def save_wav(self, output_dir, on_status=None):
         """Validate, mix, and save recorded audio. Returns the wav Path."""
         errors = []
-        if self.speaker_error:
-            errors.append(f"Speaker/loopback: {self.speaker_error}")
-        elif not self._speaker_chunks:
-            errors.append("Speaker/loopback: no audio captured.")
-        if self.mic_error:
-            errors.append(f"Microphone: {self.mic_error}")
-        elif not self._mic_chunks:
-            errors.append("Microphone: no audio captured.")
+        if self._enable_speaker:
+            if self.speaker_error:
+                errors.append(f"Speaker/loopback: {self.speaker_error}")
+            elif not self._speaker_chunks:
+                errors.append("Speaker/loopback: no audio captured.")
+        if self._enable_mic:
+            if self.mic_error:
+                errors.append(f"Microphone: {self.mic_error}")
+            elif not self._mic_chunks:
+                errors.append("Microphone: no audio captured.")
         if errors:
             raise RuntimeError("\n".join(errors))
         if on_status:
@@ -614,7 +624,7 @@ class MainWindow(QWidget):
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400, 435)
+        self.setFixedSize(400, 490)
         self._setup_ui()
 
         # ── 6. Signal connections ─────────────────────────────────────────────
@@ -652,6 +662,12 @@ class MainWindow(QWidget):
         self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
         self.diarization_checkbox = QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setEnabled(False)
+        self.mic_checkbox = QCheckBox("Microphone")
+        self.mic_checkbox.setChecked(True)
+        self.speaker_checkbox = QCheckBox("Speaker (loopback)")
+        self.speaker_checkbox.setChecked(True)
+        self.mic_checkbox.toggled.connect(self._on_source_toggled)
+        self.speaker_checkbox.toggled.connect(self._on_source_toggled)
         self.start_button = QPushButton("Start Recording")
         self.start_button.setProperty("primary", True)
         self.start_button.setEnabled(True)
@@ -678,12 +694,20 @@ class MainWindow(QWidget):
         lay.addWidget(self.progress_bar)
         lay.addWidget(self.cancel_button)
         lay.addWidget(self.duration_label)
-        lay.addWidget(self.language_label)
-        lay.addWidget(self.language_combo)
-        lay.addWidget(self.transcribe_checkbox)
-        lay.addWidget(self.diarization_checkbox)
         lay.addWidget(self.install_whisper_button)
         lay.addWidget(self.install_pyannote_button)
+        lay.addWidget(self.language_label)
+        lay.addWidget(self.language_combo)
+        chk_row = QHBoxLayout()
+        left_col = QVBoxLayout()
+        left_col.addWidget(self.transcribe_checkbox)
+        left_col.addWidget(self.diarization_checkbox)
+        right_col = QVBoxLayout()
+        right_col.addWidget(self.mic_checkbox)
+        right_col.addWidget(self.speaker_checkbox)
+        chk_row.addLayout(left_col)
+        chk_row.addLayout(right_col)
+        lay.addLayout(chk_row)
         lay.addWidget(self.start_button)
         lay.addWidget(self.stop_button)
         lay.addWidget(self.transcribe_wav_button)
@@ -782,7 +806,15 @@ class MainWindow(QWidget):
 
     def _on_initial_load_complete(self):
         self.progress_bar.setVisible(False)
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self._sources_enabled())
+
+    def _sources_enabled(self):
+        return self.mic_checkbox.isChecked() or self.speaker_checkbox.isChecked()
+
+    def _on_source_toggled(self):
+        self.start_button.setEnabled(
+            self._sources_enabled() and not self.recording and not self._processing
+        )
 
     def _update_controls(self):
         if not self.whisper_ready:
@@ -810,6 +842,9 @@ class MainWindow(QWidget):
             and not self.recording
             and not self._processing
         )
+        sources_unlocked = not self.recording and not self._processing
+        self.mic_checkbox.setEnabled(sources_unlocked)
+        self.speaker_checkbox.setEnabled(sources_unlocked)
 
     def _on_install_whisper_clicked(self):
         self._whisper_installing = True
@@ -898,8 +933,13 @@ class MainWindow(QWidget):
         self.language_combo.setEnabled(False)
         self.transcribe_checkbox.setEnabled(False)
         self.diarization_checkbox.setEnabled(False)
+        self.mic_checkbox.setEnabled(False)
+        self.speaker_checkbox.setEnabled(False)
         self.signals.status_changed.emit("Recording...")
-        self.recorder.start()
+        self.recorder.start(
+            enable_speaker=self.speaker_checkbox.isChecked(),
+            enable_mic=self.mic_checkbox.isChecked(),
+        )
 
     def _stop_recording(self):
         self.recording = False
@@ -996,7 +1036,7 @@ class MainWindow(QWidget):
         self.progress_bar.setVisible(False)
         self.cancel_button.setVisible(False)
         self.duration_label.setText("00:00:00")
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self._sources_enabled())
         self._processing = False
         self._update_controls()
         if folder:
@@ -1009,7 +1049,7 @@ class MainWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.status_label.setText("Completed")
         self.duration_label.setText("00:00:00")
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self._sources_enabled())
         self.stop_button.setEnabled(False)
         self._processing = False
         self._update_controls()
@@ -1020,7 +1060,7 @@ class MainWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.status_label.setText("Error")
         self.duration_label.setText("00:00:00")
-        self.start_button.setEnabled(True)
+        self.start_button.setEnabled(self._sources_enabled())
         self.stop_button.setEnabled(False)
         self._processing = False
         self._update_controls()
