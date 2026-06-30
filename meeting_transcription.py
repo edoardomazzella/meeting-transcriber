@@ -385,8 +385,11 @@ class AudioRecorder:
         def rms_to_level(chunks):
             if not chunks:
                 return 0
-            rms = float(np.sqrt(np.mean(chunks[-1] ** 2)))
-            if rms <= 0:
+            chunk = chunks[-1]
+            if len(chunk) == 0:
+                return 0
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if not np.isfinite(rms) or rms <= 0:
                 return 0
             db = 20 * np.log10(rms)
             return max(0, min(100, int((db + 60) / 60 * 100)))
