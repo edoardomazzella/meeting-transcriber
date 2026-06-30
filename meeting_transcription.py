@@ -26,7 +26,7 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QMessageBox, QComboBox,
-    QDialog, QLineEdit, QCheckBox, QProgressBar
+    QDialog, QLineEdit, QCheckBox, QProgressBar, QFileDialog
 )
 
 import logging
@@ -364,7 +364,7 @@ class TranscriptionEngine:
         return self._save_diarized_transcript(segments, speaker_segments, output_dir)
 
     def _save_transcript(self, segments, output_dir):
-        txt = Path(output_dir) / "transcript.txt"
+        txt = self._unique_path(Path(output_dir) / "transcript.txt")
         with open(txt, "w", encoding="utf-8") as f:
             for segment in segments:
                 if segment.text.strip():
@@ -387,13 +387,21 @@ class TranscriptionEngine:
 
     def _save_diarized_transcript(self, segments, speaker_segments, output_dir):
         blocks = self._assign_speakers_to_words(segments, speaker_segments)
-        diarized_txt = Path(output_dir) / "transcript_diarized.txt"
+        diarized_txt = self._unique_path(Path(output_dir) / "transcript_diarized.txt")
         with open(diarized_txt, "w", encoding="utf-8") as f:
             for timestamp, speaker, text in blocks:
                 if not text.strip():
                     continue
                 f.write(f"[{format_timestamp(timestamp)}] [{speaker}] {text}\n\n")
         return diarized_txt
+
+    @staticmethod
+    def _unique_path(path: Path) -> Path:
+        """Return path unchanged if it doesn't exist, otherwise add a timestamp suffix."""
+        if not path.exists():
+            return path
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return path.with_stem(f"{path.stem}_{ts}")
 
     def _find_best_speaker(self, speaker_segments, start, end):
         if speaker_segments is None:
@@ -595,7 +603,7 @@ class MainWindow(QWidget):
         self._whisper_installing = False
         self._pyannote_installing = False
         self._pyannote_loading = True
-
+        self._processing = False
         # ── 4. Threading events (signal→dialog handshake) ─────────────────────
         self._whisper_setup_event = threading.Event()
         self._whisper_setup_result = False
@@ -605,7 +613,7 @@ class MainWindow(QWidget):
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400, 400)
+        self.setFixedSize(400, 435)
         self._setup_ui()
 
         # ── 6. Signal connections ─────────────────────────────────────────────
@@ -644,11 +652,13 @@ class MainWindow(QWidget):
         self.diarization_checkbox = QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setEnabled(False)
         self.start_button = QPushButton("Start Recording")
-        self.start_button.setEnabled(False)
+        self.start_button.setEnabled(True)
         self.stop_button = QPushButton("Stop Recording")
         self.stop_button.setEnabled(False)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setVisible(False)
+        self.transcribe_wav_button = QPushButton("Transcribe WAV...")
+        self.transcribe_wav_button.setEnabled(False)
         self.install_whisper_button = QPushButton("Install Whisper...")
         self.install_whisper_button.setEnabled(False)
         self.install_pyannote_button = QPushButton("Install Pyannote...")
@@ -657,6 +667,7 @@ class MainWindow(QWidget):
         self.start_button.clicked.connect(self._start_recording)
         self.stop_button.clicked.connect(self._stop_recording)
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
+        self.transcribe_wav_button.clicked.connect(self._on_transcribe_wav_clicked)
         self.install_whisper_button.clicked.connect(self._on_install_whisper_clicked)
         self.install_pyannote_button.clicked.connect(self._on_install_pyannote_clicked)
 
@@ -673,6 +684,7 @@ class MainWindow(QWidget):
         lay.addWidget(self.install_pyannote_button)
         lay.addWidget(self.start_button)
         lay.addWidget(self.stop_button)
+        lay.addWidget(self.transcribe_wav_button)
 
     def _connect_signals(self):
         self.signals.status_changed.connect(self.status_label.setText)
@@ -791,6 +803,11 @@ class MainWindow(QWidget):
             and not self._pyannote_installing
             and not self._pyannote_loading
         )
+        self.transcribe_wav_button.setEnabled(
+            self.whisper_ready
+            and not self.recording
+            and not self._processing
+        )
 
     def _on_install_whisper_clicked(self):
         self._whisper_installing = True
@@ -886,6 +903,7 @@ class MainWindow(QWidget):
         self.recording = False
         self.recorder.stop()
         self._cancel_event.clear()
+        self._processing = True
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.cancel_button.setVisible(True)
@@ -900,7 +918,44 @@ class MainWindow(QWidget):
             args=(language, enable_transcription, enable_diarization),
             daemon=True,
         ).start()
+    def _on_transcribe_wav_clicked(self):
+        wav_path, _ = QFileDialog.getOpenFileName(
+            self, "Select WAV file", str(OUTPUT_DIR), "WAV files (*.wav);;All files (*)"
+        )
+        if not wav_path:
+            return
+        wav_path = Path(wav_path)
+        self._cancel_event.clear()
+        self._processing = True
+        self.start_button.setEnabled(False)
+        self.cancel_button.setVisible(True)
+        self.cancel_button.setEnabled(True)
+        self.progress_bar.setVisible(True)
+        self._update_controls()
+        self.signals.status_changed.emit("Preparing...")
+        language = self.language_combo.currentData()
+        enable_diarization = self.diarization_checkbox.isChecked()
+        threading.Thread(
+            target=self._transcribe_wav_file,
+            args=(wav_path, language, enable_diarization),
+            daemon=True,
+        ).start()
 
+    def _transcribe_wav_file(self, wav_path, language, enable_diarization):
+        try:
+            result_file = self.engine.process(
+                wav_path, wav_path.parent, language, enable_diarization,
+                self.signals.status_changed.emit,
+                self._cancel_event,
+            )
+            if self._cancel_event.is_set():
+                self.signals.cancelled.emit(str(wav_path.parent) if result_file else "")
+            else:
+                self.signals.finished.emit(str(wav_path.parent), str(result_file))
+        except Exception as e:
+            print(f"[WAV Transcription] {type(e).__name__}: {e}")
+            traceback.print_exc()
+            self.signals.error.emit(traceback.format_exc())
     # ── Processing ────────────────────────────────────────────────────────────
 
     def _process_recording(self, language, enable_transcription, enable_diarization):
@@ -940,6 +995,7 @@ class MainWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
+        self._processing = False
         self._update_controls()
         if folder:
             self.status_label.setText("Cancelled — partial transcript saved")
@@ -953,6 +1009,7 @@ class MainWindow(QWidget):
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self._processing = False
         self._update_controls()
         QMessageBox.information(self,"Completed",f"Folder:\n{folder}\n\nTranscript:\n{file}")
 
@@ -963,6 +1020,7 @@ class MainWindow(QWidget):
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self._processing = False
         self._update_controls()
         QMessageBox.critical(self,"Error",message)
 
