@@ -349,6 +349,20 @@ class AudioRecorder:
         mixed *= 0.95
         return np.clip(mixed, -1, 1)
 
+    def get_levels(self):
+        """Returns (mic_level, speaker_level) as integers 0-100."""
+        def rms_to_level(chunks):
+            if not chunks:
+                return 0
+            rms = float(np.sqrt(np.mean(chunks[-1] ** 2)))
+            if rms <= 0:
+                return 0
+            db = 20 * np.log10(rms)
+            return max(0, min(100, int((db + 60) / 60 * 100)))
+        mic = rms_to_level(self._mic_chunks) if self._enable_mic else 0
+        spk = rms_to_level(self._speaker_chunks) if self._enable_speaker else 0
+        return mic, spk
+
 
 # ── TranscriptionEngine ───────────────────────────────────────────────────────
 
@@ -624,7 +638,7 @@ class MainWindow(QWidget):
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400, 490)
+        self.setFixedSize(400, 520)
         self._setup_ui()
 
         # ── 6. Signal connections ─────────────────────────────────────────────
@@ -636,6 +650,10 @@ class MainWindow(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self._update_duration)
         self.timer.start(1000)
+
+        self._level_timer = QTimer()
+        self._level_timer.setInterval(80)
+        self._level_timer.timeout.connect(self._update_levels)
 
     # ── UI setup ──────────────────────────────────────────────────────────────
 
@@ -682,6 +700,38 @@ class MainWindow(QWidget):
         self.install_pyannote_button = QPushButton("Install Pyannote...")
         self.install_pyannote_button.setEnabled(False)
 
+        # Level meters (shown only while recording)
+        self.mic_level_bar = QProgressBar()
+        self.mic_level_bar.setRange(0, 100)
+        self.mic_level_bar.setValue(0)
+        self.mic_level_bar.setTextVisible(False)
+        self.mic_level_bar.setFixedHeight(8)
+        self.mic_level_bar.setObjectName("levelBar")
+        self.speaker_level_bar = QProgressBar()
+        self.speaker_level_bar.setRange(0, 100)
+        self.speaker_level_bar.setValue(0)
+        self.speaker_level_bar.setTextVisible(False)
+        self.speaker_level_bar.setFixedHeight(8)
+        self.speaker_level_bar.setObjectName("levelBar")
+        self.mic_level_widget = QWidget()
+        _ml = QHBoxLayout(self.mic_level_widget)
+        _ml.setContentsMargins(0, 0, 0, 0)
+        _ml.setSpacing(6)
+        _mic_lbl = QLabel("Mic")
+        _mic_lbl.setFixedWidth(38)
+        _ml.addWidget(_mic_lbl)
+        _ml.addWidget(self.mic_level_bar)
+        self.mic_level_widget.setVisible(False)
+        self.speaker_level_widget = QWidget()
+        _sl = QHBoxLayout(self.speaker_level_widget)
+        _sl.setContentsMargins(0, 0, 0, 0)
+        _sl.setSpacing(6)
+        _spk_lbl = QLabel("Spkr")
+        _spk_lbl.setFixedWidth(38)
+        _sl.addWidget(_spk_lbl)
+        _sl.addWidget(self.speaker_level_bar)
+        self.speaker_level_widget.setVisible(False)
+
         self.start_button.clicked.connect(self._start_recording)
         self.stop_button.clicked.connect(self._stop_recording)
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
@@ -694,6 +744,8 @@ class MainWindow(QWidget):
         lay.addWidget(self.progress_bar)
         lay.addWidget(self.cancel_button)
         lay.addWidget(self.duration_label)
+        lay.addWidget(self.mic_level_widget)
+        lay.addWidget(self.speaker_level_widget)
         lay.addWidget(self.install_whisper_button)
         lay.addWidget(self.install_pyannote_button)
         lay.addWidget(self.language_label)
@@ -923,6 +975,11 @@ class MainWindow(QWidget):
             e=int(time.monotonic()-self.start_time)
             self.duration_label.setText(f"{e//3600:02}:{(e%3600)//60:02}:{e%60:02}")
 
+    def _update_levels(self):
+        mic_level, spk_level = self.recorder.get_levels()
+        self.mic_level_bar.setValue(mic_level)
+        self.speaker_level_bar.setValue(spk_level)
+
     # ── Recording ─────────────────────────────────────────────────────────────
 
     def _start_recording(self):
@@ -936,13 +993,19 @@ class MainWindow(QWidget):
         self.mic_checkbox.setEnabled(False)
         self.speaker_checkbox.setEnabled(False)
         self.signals.status_changed.emit("Recording...")
+        self.mic_level_widget.setVisible(self.mic_checkbox.isChecked())
+        self.speaker_level_widget.setVisible(self.speaker_checkbox.isChecked())
         self.recorder.start(
             enable_speaker=self.speaker_checkbox.isChecked(),
             enable_mic=self.mic_checkbox.isChecked(),
         )
+        self._level_timer.start()
 
     def _stop_recording(self):
         self.recording = False
+        self._level_timer.stop()
+        self.mic_level_widget.setVisible(False)
+        self.speaker_level_widget.setVisible(False)
         self.recorder.stop()
         self._cancel_event.clear()
         self._processing = True
@@ -1145,6 +1208,17 @@ def _apply_style(app):
         }}
         QProgressBar::chunk {{
             background-color: {_ACCENT};
+            border-radius: 3px;
+        }}
+        QProgressBar#levelBar {{
+            border: 1px solid {_BORDER};
+            border-radius: 3px;
+            background-color: #E8E8E8;
+        }}
+        QProgressBar#levelBar::chunk {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0.0 #00C853, stop:0.65 #FFD600,
+                stop:0.85 #FF6D00, stop:1.0 #D50000);
             border-radius: 3px;
         }}
         QComboBox {{
