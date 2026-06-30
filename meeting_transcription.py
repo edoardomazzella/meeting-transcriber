@@ -26,13 +26,14 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QMessageBox, QComboBox,
-    QDialog, QLineEdit, QCheckBox
+    QDialog, QLineEdit, QCheckBox, QProgressBar
 )
 
 import logging
 logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
 
 warnings.filterwarnings("ignore", message=r"TensorFloat-32", module=r"pyannote\.audio")
+warnings.filterwarnings("ignore", message=r"std\(\): degrees of freedom is <= 0", category=UserWarning)
 
 try:
     with warnings.catch_warnings():
@@ -80,6 +81,7 @@ class Signals(QObject):
     pyannote_setup_finished = Signal(bool)
     messagebox_requested = Signal(str, str, str)
     initial_load_complete = Signal()
+    progress_visible = Signal(bool)
 
 
 # ── WhisperManager ────────────────────────────────────────────────────────────
@@ -590,7 +592,7 @@ class MainWindow(QWidget):
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400, 340)
+        self.setFixedSize(400, 365)
         self._setup_ui()
 
         # ── 6. Signal connections ─────────────────────────────────────────────
@@ -608,6 +610,11 @@ class MainWindow(QWidget):
     def _setup_ui(self):
         self.status_label = QLabel("Loading Whisper...")
         self.status_label.setAlignment(Qt.AlignCenter)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(6)
+        self.progress_bar.setVisible(False)
         self.duration_label = QLabel("00:00:00")
         self.duration_label.setAlignment(Qt.AlignCenter)
         self.language_label = QLabel("Transcription language")
@@ -639,6 +646,7 @@ class MainWindow(QWidget):
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.status_label)
+        lay.addWidget(self.progress_bar)
         lay.addWidget(self.duration_label)
         lay.addWidget(self.language_label)
         lay.addWidget(self.language_combo)
@@ -659,10 +667,12 @@ class MainWindow(QWidget):
         self.signals.pyannote_setup_requested.connect(self._on_pyannote_setup_requested)
         self.signals.messagebox_requested.connect(self._on_messagebox_requested)
         self.signals.initial_load_complete.connect(self._on_initial_load_complete)
+        self.signals.progress_visible.connect(self.progress_bar.setVisible)
 
     # ── Model loading (background thread) ────────────────────────────────────
 
     def _load_models(self):
+        self.signals.progress_visible.emit(True)
         should_load = self.whisper.is_installed()
         if not should_load:
             self._whisper_setup_event.clear()
@@ -739,6 +749,7 @@ class MainWindow(QWidget):
         self._update_controls()
 
     def _on_initial_load_complete(self):
+        self.progress_bar.setVisible(False)
         self.start_button.setEnabled(True)
 
     def _update_controls(self):
@@ -766,6 +777,7 @@ class MainWindow(QWidget):
     def _on_install_whisper_clicked(self):
         self._whisper_installing = True
         self._update_controls()
+        self.progress_bar.setVisible(True)
         threading.Thread(target=self._run_whisper_install, daemon=True).start()
 
     def _run_whisper_install(self):
@@ -776,23 +788,28 @@ class MainWindow(QWidget):
             try:
                 self.whisper.load(self.signals.status_changed.emit)
                 self._whisper_installing = False
+                self.signals.progress_visible.emit(False)
                 self.signals.whisper_ready.emit(True)
             except Exception as e:
                 self._whisper_installing = False
+                self.signals.progress_visible.emit(False)
                 self.signals.whisper_ready.emit(False)
                 self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
         else:
             self._whisper_installing = False
+            self.signals.progress_visible.emit(False)
             self.signals.whisper_ready.emit(False)
 
     def _on_install_pyannote_clicked(self):
         self._pyannote_installing = True
         self._update_controls()
+        self.progress_bar.setVisible(True)
         threading.Thread(target=self._run_pyannote_install, daemon=True).start()
 
     def _run_pyannote_install(self):
         ok = self._initialize_pyannote()
         self._pyannote_installing = False
+        self.signals.progress_visible.emit(False)
         self.signals.pyannote_ready.emit(ok)
 
     def _on_whisper_setup_requested(self):
@@ -853,6 +870,7 @@ class MainWindow(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.signals.status_changed.emit("Stopping recording...")
+        self.progress_bar.setVisible(True)
         language = self.language_combo.currentData()
         enable_transcription = self.transcribe_checkbox.isChecked()
         enable_diarization = self.diarization_checkbox.isChecked()
@@ -887,7 +905,8 @@ class MainWindow(QWidget):
             traceback.print_exc()
             self.signals.error.emit(traceback.format_exc())
 
-    def _on_transcription_finished(self,folder,file):
+    def _on_transcription_finished(self, folder, file):
+        self.progress_bar.setVisible(False)
         self.status_label.setText("Completed")
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
@@ -895,7 +914,8 @@ class MainWindow(QWidget):
         self._update_controls()
         QMessageBox.information(self,"Completed",f"Folder:\n{folder}\n\nTranscript:\n{file}")
 
-    def _on_transcription_error(self,message):
+    def _on_transcription_error(self, message):
+        self.progress_bar.setVisible(False)
         self.status_label.setText("Error")
         self.duration_label.setText("00:00:00")
         self.start_button.setEnabled(True)
