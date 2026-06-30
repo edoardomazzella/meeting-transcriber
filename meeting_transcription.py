@@ -1152,6 +1152,7 @@ def _apply_style(app):
             border-radius: 4px;
             padding: 4px 8px;
             background-color: {_SURFACE};
+            color: {_TEXT};
             min-height: 22px;
         }}
         QComboBox:hover {{ border-color: {_ACCENT}; }}
