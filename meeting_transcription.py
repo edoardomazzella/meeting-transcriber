@@ -9,13 +9,44 @@ from datetime import datetime
 import time
 import os
 import webbrowser
+import json
 
 import numpy as np
 import soundfile as sf
 import torch
 
-# CUDA configuration (leave empty to disable explicit CUDA DLL loading)
-CUDA_BIN_DIR = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin"
+# ── Paths & configuration ────────────────────────────────────────────────────
+SCRIPT_DIR = Path(__file__).resolve().parent
+MODEL_DIR  = SCRIPT_DIR / "models"
+MODEL_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR = SCRIPT_DIR / "recordings"
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+_CONFIG_FILE = SCRIPT_DIR / "config.json"
+_CONFIG_DEFAULTS = {
+    "cuda_bin_dir": r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
+    "model_size":   "medium",
+    "beam_size":    5,
+    "vad":          False,
+}
+
+def _load_config():
+    if _CONFIG_FILE.exists():
+        try:
+            with open(_CONFIG_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return {**_CONFIG_DEFAULTS, **data}
+        except Exception:
+            pass
+    with open(_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(_CONFIG_DEFAULTS, f, indent=4)
+    return dict(_CONFIG_DEFAULTS)
+
+_cfg        = _load_config()
+CUDA_BIN_DIR = _cfg["cuda_bin_dir"]
+MODEL_SIZE   = _cfg["model_size"]
+BEAM_SIZE    = int(_cfg["beam_size"])
+VAD          = bool(_cfg["vad"])
 
 if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
@@ -44,21 +75,7 @@ except Exception:
     Pipeline = None
 
 SAMPLE_RATE = 16000
-CHUNK_SIZE = 4096
-SCRIPT_DIR = Path(__file__).resolve().parent
-MODEL_DIR = SCRIPT_DIR / "models"
-MODEL_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR = SCRIPT_DIR / "recordings"
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-# Whisper model
-MODEL_SIZE = "medium" # small, medium, large-v3, large-v3-turbo
-
-# Whisper decoding
-BEAM_SIZE = 5
-
-# Voice Activity Detection: when turned on, audio is not analyzed in case of silence.
-VAD = True
+CHUNK_SIZE  = 4096
 
 def format_timestamp(seconds):
     h = int(seconds // 3600)
