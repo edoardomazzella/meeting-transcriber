@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 import logging
 logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
 
+warnings.filterwarnings("ignore", message=r"TensorFloat-32", module=r"pyannote\.audio")
+
 try:
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
@@ -79,6 +81,76 @@ class Signals(QObject):
     messagebox_requested = Signal(str, str, str)
     initial_load_complete = Signal()
 
+
+# ── WhisperManager ────────────────────────────────────────────────────────────
+
+class WhisperManager:
+    """Manages Whisper model: installation check, loading, and transcription."""
+
+    def __init__(self, model_dir):
+        self.model_dir = Path(model_dir)
+        self.model = None
+
+    def is_installed(self):
+        return (self.model_dir / f"models--Systran--faster-whisper-{MODEL_SIZE}").exists()
+
+    def load(self, on_status=None):
+        """Load the model (tries CUDA first, falls back to CPU). Raises on failure."""
+        model_cache = self.model_dir / f"models--Systran--faster-whisper-{MODEL_SIZE}"
+        if on_status:
+            on_status(
+                f"Loading model ({MODEL_SIZE})..."
+                if model_cache.exists()
+                else f"Downloading model ({MODEL_SIZE})..."
+            )
+
+        def friendly_error(exc):
+            msg = str(exc).lower()
+            if "out of memory" in msg or "cuda out of memory" in msg:
+                return "GPU memory is insufficient to load the Whisper model."
+            if "cuda" in msg or "cudnn" in msg or "cublas" in msg:
+                return "CUDA initialization failed. Check GPU drivers and CUDA installation."
+            if "404" in msg or "not found" in msg:
+                return "Whisper model not found."
+            if any(x in msg for x in ("download", "connection", "network", "timeout", "ssl")):
+                return "Unable to download the Whisper model. Check your Internet connection."
+            return None
+
+        message = None
+        try:
+            self.model = WhisperModel(
+                MODEL_SIZE, device="cuda", compute_type="float16",
+                download_root=str(self.model_dir),
+            )
+            return
+        except Exception as e:
+            print(f"[Whisper CUDA] {e}")
+            traceback.print_exc()
+            message = friendly_error(e)
+
+        try:
+            self.model = WhisperModel(
+                MODEL_SIZE, device="cpu", compute_type="int8",
+                download_root=str(self.model_dir),
+            )
+        except Exception as e:
+            print(f"[Whisper CPU] {e}")
+            traceback.print_exc()
+            raise RuntimeError(message or f"Unable to load the Whisper model.\n\n{e}")
+
+    def transcribe(self, wav, language=None, on_status=None):
+        """Transcribe a wav file. Returns a list of segments."""
+        if on_status:
+            on_status("Transcribing...")
+        args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True)
+        if language:
+            args["language"] = language
+        segments, _ = self.model.transcribe(**args)
+        return list(segments)
+
+
+# ── PyannoteManager ───────────────────────────────────────────────────────────
+
 class PyannoteManager:
     def __init__(self, base_dir):
         self.base_dir = Path(base_dir)
@@ -87,7 +159,7 @@ class PyannoteManager:
         self.token_file = self.models_dir / "token.txt"
         self.pipeline = None
 
-    def models_exist(self):
+    def is_installed(self):
         required = self.models_dir / "models--pyannote--speaker-diarization"
         if required.exists():
             return True
@@ -133,29 +205,294 @@ class PyannoteManager:
             raise
 
     def _initialize_pipeline(self):
-        if self.pipeline is not None:
-            return self.pipeline
-
         if Pipeline is None:
             raise RuntimeError("Pyannote not available.")
-
         token = self.load_token()
-
         self.pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-community-1",
             token=token,
             cache_dir=str(self.models_dir),
         )
-
         if torch.cuda.is_available():
             self.pipeline.to(torch.device("cuda"))
 
-        return self.pipeline
-
     def get_pipeline(self):
         if self.pipeline is None:
-            return self._initialize_pipeline()
+            self._initialize_pipeline()
         return self.pipeline
+
+
+# ── AudioRecorder ─────────────────────────────────────────────────────────────
+
+class AudioRecorder:
+    """Captures speaker loopback + microphone audio on separate threads."""
+
+    def __init__(self, sample_rate=SAMPLE_RATE, chunk_size=CHUNK_SIZE,
+                 speaker_gain=SPEAKER_GAIN, mic_gain=MIC_GAIN):
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        self.speaker_gain = speaker_gain
+        self.mic_gain = mic_gain
+        self._speaker_chunks = []
+        self._mic_chunks = []
+        self.speaker_error = None
+        self.mic_error = None
+        self._stop_event = threading.Event()
+        self._speaker_thread = None
+        self._mic_thread = None
+
+    def start(self):
+        self._speaker_chunks = []
+        self._mic_chunks = []
+        self.speaker_error = None
+        self.mic_error = None
+        self._stop_event = threading.Event()
+        self._speaker_thread = threading.Thread(target=self._record_speaker, daemon=True)
+        self._mic_thread = threading.Thread(target=self._record_microphone, daemon=True)
+        self._speaker_thread.start()
+        self._mic_thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        for t in (self._speaker_thread, self._mic_thread):
+            if t and t.is_alive():
+                t.join()
+
+    def save_wav(self, output_dir, on_status=None):
+        """Validate, mix, and save recorded audio. Returns the wav Path."""
+        errors = []
+        if self.speaker_error:
+            errors.append(f"Speaker/loopback: {self.speaker_error}")
+        elif not self._speaker_chunks:
+            errors.append("Speaker/loopback: no audio captured.")
+        if self.mic_error:
+            errors.append(f"Microphone: {self.mic_error}")
+        elif not self._mic_chunks:
+            errors.append("Microphone: no audio captured.")
+        if errors:
+            raise RuntimeError("\n".join(errors))
+        if on_status:
+            on_status("Preparing audio...")
+        mixed = self._mix()
+        self._speaker_chunks.clear()
+        self._mic_chunks.clear()
+        wav = Path(output_dir) / "mixed.wav"
+        sf.write(str(wav), mixed, self.sample_rate)
+        return wav
+
+    def _record_speaker(self):
+        try:
+            import soundcard as sc
+            sp = sc.default_speaker()
+            if sp is None:
+                raise RuntimeError("No default speaker found.")
+            loop = sc.get_microphone(id=str(sp.name), include_loopback=True)
+            with loop.recorder(samplerate=self.sample_rate) as r:
+                while not self._stop_event.is_set():
+                    c = r.record(numframes=self.chunk_size)
+                    if c.ndim > 1:
+                        c = np.mean(c, axis=1)
+                    self._speaker_chunks.append(c.astype(np.float32))
+        except Exception as e:
+            print(f"[Soundcard Speaker] {type(e).__name__}: {e}")
+            self.speaker_error = str(e)
+            traceback.print_exc()
+
+    def _record_microphone(self):
+        try:
+            import soundcard as sc
+            mic = sc.default_microphone()
+            if mic is None:
+                raise RuntimeError("No default microphone found.")
+            with mic.recorder(samplerate=self.sample_rate) as r:
+                while not self._stop_event.is_set():
+                    c = r.record(numframes=self.chunk_size)
+                    if c.ndim > 1:
+                        c = np.mean(c, axis=1)
+                    self._mic_chunks.append(c.astype(np.float32))
+        except Exception as e:
+            print(f"[Soundcard Microphone] {type(e).__name__}: {e}")
+            self.mic_error = str(e)
+            traceback.print_exc()
+
+    def _mix(self):
+        sp = np.concatenate(self._speaker_chunks) if self._speaker_chunks else np.zeros(0, np.float32)
+        mic = np.concatenate(self._mic_chunks) if self._mic_chunks else np.zeros(0, np.float32)
+        sp = np.clip(sp * self.speaker_gain, -1, 1)
+        mic = np.clip(mic * self.mic_gain, -1, 1)
+        n = max(len(sp), len(mic), 1)
+        sp = np.pad(sp, (0, n - len(sp)))
+        mic = np.pad(mic, (0, n - len(mic)))
+        mixed = sp + mic
+        peak = np.max(np.abs(mixed))
+        if peak > 1:
+            mixed /= peak
+        mixed *= 0.95
+        return np.clip(mixed, -1, 1)
+
+
+# ── TranscriptionEngine ───────────────────────────────────────────────────────
+
+class TranscriptionEngine:
+    """Orchestrates Whisper transcription and Pyannote speaker diarization."""
+
+    def __init__(self, whisper, pyannote):
+        self.whisper = whisper
+        self.pyannote = pyannote
+
+    def process(self, wav, output_dir, language, enable_diarization, on_status=None):
+        """Transcribe and optionally diarize. Returns the path to the output file."""
+        segments = self.whisper.transcribe(wav, language, on_status)
+        txt = self._save_transcript(segments, output_dir)
+        if not enable_diarization:
+            return txt
+        speaker_segments = self._run_diarization(wav, on_status)
+        return self._save_diarized_transcript(segments, speaker_segments, output_dir)
+
+    def _save_transcript(self, segments, output_dir):
+        txt = Path(output_dir) / "transcript.txt"
+        with open(txt, "w", encoding="utf-8") as f:
+            for segment in segments:
+                if segment.text.strip():
+                    f.write(f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n")
+        return txt
+
+    def _run_diarization(self, wav, on_status=None):
+        waveform, sr = sf.read(str(wav), dtype="float32")
+        if waveform.ndim == 1:
+            waveform = waveform[np.newaxis, :]
+        else:
+            waveform = waveform.T
+        waveform = torch.from_numpy(waveform)
+        if on_status:
+            on_status("Running speaker diarization...")
+        result = self.pyannote.get_pipeline()({"waveform": waveform, "sample_rate": sr})
+        speaker_segments = result.exclusive_speaker_diarization
+        del waveform
+        return speaker_segments
+
+    def _save_diarized_transcript(self, segments, speaker_segments, output_dir):
+        blocks = self._assign_speakers_to_words(segments, speaker_segments)
+        diarized_txt = Path(output_dir) / "transcript_diarized.txt"
+        with open(diarized_txt, "w", encoding="utf-8") as f:
+            for timestamp, speaker, text in blocks:
+                if not text.strip():
+                    continue
+                f.write(f"[{format_timestamp(timestamp)}] [{speaker}] {text}\n\n")
+        return diarized_txt
+
+    def _find_best_speaker(self, speaker_segments, start, end):
+        if speaker_segments is None:
+            return None
+        center = (start + end) / 2.0
+        min_distance = max(0.03, (end - start) * 0.3)
+        best_speaker = None
+        best_distance = None
+        for segment, _, speaker in speaker_segments.itertracks(yield_label=True):
+            if segment.start <= center <= segment.end:
+                return speaker
+            distance = min(abs(center - segment.start), abs(center - segment.end))
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_speaker = speaker
+        if best_distance is not None and best_distance <= min_distance:
+            return best_speaker
+        return None
+
+    def _assign_speakers_to_words(self, segments, speaker_segments):
+        words = []
+        last_speaker = None
+        HYSTERESIS_MARGIN = 0.20  # 20%
+
+        for segment in segments:
+            for word in (getattr(segment, "words", None) or []):
+                token = getattr(word, "word", "")
+                if not token:
+                    continue
+                start = getattr(word, "start", None)
+                end = getattr(word, "end", None)
+                if start is None or end is None:
+                    continue
+
+                speaker = self._find_best_speaker(speaker_segments, start, end)
+                if speaker is None:
+                    speaker = "UNKNOWN"
+
+                # Hysteresis: avoid changing speaker unless the new one is
+                # significantly closer than the current one.
+                if (
+                    last_speaker is not None
+                    and speaker != last_speaker
+                    and speaker != "UNKNOWN"
+                ):
+                    center = (start + end) / 2.0
+                    current_distance = None
+                    new_distance = None
+                    for seg, _, spk in speaker_segments.itertracks(yield_label=True):
+                        distance = min(abs(center - seg.start), abs(center - seg.end))
+                        if seg.start <= center <= seg.end:
+                            distance = 0.0
+                        if spk == last_speaker:
+                            if current_distance is None or distance < current_distance:
+                                current_distance = distance
+                        if spk == speaker:
+                            if new_distance is None or distance < new_distance:
+                                new_distance = distance
+                    if (
+                        current_distance is not None
+                        and new_distance is not None
+                        and current_distance > 0
+                    ):
+                        improvement = (current_distance - new_distance) / current_distance
+                        if improvement < HYSTERESIS_MARGIN:
+                            speaker = last_speaker
+
+                if speaker != "UNKNOWN":
+                    last_speaker = speaker
+
+                words.append({"speaker": speaker, "text": token, "start": start})
+
+        # Remove isolated one-word speaker changes: A A A B A A -> A A A A A A
+        if len(words) >= 3:
+            for i in range(1, len(words) - 1):
+                prev_speaker = words[i - 1]["speaker"]
+                curr_speaker = words[i]["speaker"]
+                next_speaker = words[i + 1]["speaker"]
+                if (
+                    curr_speaker != prev_speaker
+                    and curr_speaker != next_speaker
+                    and prev_speaker == next_speaker
+                ):
+                    words[i]["speaker"] = prev_speaker
+
+        blocks = []
+        current_speaker = None
+        current_start = None
+        current_parts = []
+
+        for item in words:
+            speaker = item["speaker"]
+            token = item["text"]
+            if current_speaker is None:
+                current_speaker = speaker
+                current_start = item["start"]
+                current_parts = [token]
+                continue
+            if speaker != current_speaker:
+                blocks.append((current_start, current_speaker, "".join(current_parts).strip()))
+                current_speaker = speaker
+                current_start = item["start"]
+                current_parts = [token]
+            else:
+                current_parts.append(token)
+
+        if current_speaker is not None:
+            blocks.append((current_start, current_speaker, "".join(current_parts).strip()))
+
+        return blocks
+
+
+# ── PyannoteSetupDialog ───────────────────────────────────────────────────────
 
 class PyannoteSetupDialog(QDialog):
     def __init__(self, manager, parent=None):
@@ -227,83 +564,80 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
 
-        # ── 1. Signals object (needed before any other init) ─────────────────
+        # ── 1. Signals ────────────────────────────────────────────────────────
         self.signals = Signals()
 
-        # ── 2. All instance-variable state (must be complete before the
-        #        background thread starts, because signals emitted from that
-        #        thread can cause _update_controls() to read every attribute
-        #        listed here as soon as the Qt event loop processes them) ──────
+        # ── 2. Core components ────────────────────────────────────────────────
+        self.whisper = WhisperManager(MODEL_DIR)
+        self.pyannote = PyannoteManager(MODEL_DIR)
+        self.recorder = AudioRecorder()
+        self.engine = TranscriptionEngine(self.whisper, self.pyannote)
+
+        # ── 3. UI-state flags ─────────────────────────────────────────────────
         self.recording = False
         self.start_time = None
-        self.model = None
-        self.pyannote = PyannoteManager(MODEL_DIR)
-        self.speaker_chunks = []
-        self.mic_chunks = []
-        self.speaker_error = None
-        self.mic_error = None
-        self.speaker_thread = None
-        self.mic_thread = None
-
-        # Model-readiness flags (read by _update_controls via whisper_ready /
-        # pyannote_ready signals that the background thread emits)
         self.whisper_ready = False
         self.pyannote_ready = False
-
-        # Install-in-progress flags (read by _update_controls; must be
-        # initialized here — NOT lazily in the click handlers)
         self._whisper_installing = False
         self._pyannote_installing = False
-
-        # True while the initial startup load is checking/loading Pyannote.
-        # Keeps the Install button hidden until we know pyannote's real state.
         self._pyannote_loading = True
 
-        # Threading events for the signal→dialog→thread handshake
+        # ── 4. Threading events (signal→dialog handshake) ─────────────────────
         self._whisper_setup_event = threading.Event()
         self._whisper_setup_result = False
         self._pyannote_setup_event = threading.Event()
         self._pyannote_setup_result = False
 
-        # ── 3. Window geometry ───────────────────────────────────────────────
+        # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle("Meeting Transcriber")
         self.setFixedSize(400, 340)
+        self._setup_ui()
 
-        # ── 4. Widgets ───────────────────────────────────────────────────────
-        self.status_label=QLabel("Loading Whisper...")
+        # ── 6. Signal connections ─────────────────────────────────────────────
+        self._connect_signals()
+
+        # ── 7. Background loading thread — LAST, after every attribute is set ─
+        threading.Thread(target=self._load_models, daemon=True).start()
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._update_duration)
+        self.timer.start(1000)
+
+    # ── UI setup ──────────────────────────────────────────────────────────────
+
+    def _setup_ui(self):
+        self.status_label = QLabel("Loading Whisper...")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.duration_label=QLabel("00:00:00")
+        self.duration_label = QLabel("00:00:00")
         self.duration_label.setAlignment(Qt.AlignCenter)
-        self.language_label=QLabel("Transcription language")
+        self.language_label = QLabel("Transcription language")
         self.language_label.setAlignment(Qt.AlignCenter)
-        self.language_combo=QComboBox()
-        self.transcribe_checkbox=QCheckBox("Transcribe")
-        self.transcribe_checkbox.setEnabled(False)
-        self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
-        self.diarization_checkbox=QCheckBox("Enable speaker diarization")
-        self.diarization_checkbox.setEnabled(False)
+        self.language_combo = QComboBox()
         self.language_combo.addItem("Auto-detect", None)
         self.language_combo.addItem("Italian", "it")
         self.language_combo.addItem("English", "en")
         self.language_combo.addItem("French", "fr")
         self.language_combo.setEnabled(False)
-        self.start_button=QPushButton("Start Recording")
-        self.stop_button=QPushButton("Stop Recording")
-        self.install_whisper_button=QPushButton("Install Whisper...")
-        self.install_whisper_button.setEnabled(False)
-        self.install_pyannote_button=QPushButton("Install Pyannote...")
-        self.install_pyannote_button.setEnabled(False)
+        self.transcribe_checkbox = QCheckBox("Transcribe")
+        self.transcribe_checkbox.setEnabled(False)
+        self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
+        self.diarization_checkbox = QCheckBox("Enable speaker diarization")
+        self.diarization_checkbox.setEnabled(False)
+        self.start_button = QPushButton("Start Recording")
         self.start_button.setEnabled(False)
+        self.stop_button = QPushButton("Stop Recording")
         self.stop_button.setEnabled(False)
+        self.install_whisper_button = QPushButton("Install Whisper...")
+        self.install_whisper_button.setEnabled(False)
+        self.install_pyannote_button = QPushButton("Install Pyannote...")
+        self.install_pyannote_button.setEnabled(False)
 
-        # ── 5. Button connections ────────────────────────────────────────────
         self.start_button.clicked.connect(self._start_recording)
         self.stop_button.clicked.connect(self._stop_recording)
         self.install_whisper_button.clicked.connect(self._on_install_whisper_clicked)
         self.install_pyannote_button.clicked.connect(self._on_install_pyannote_clicked)
 
-        # ── 6. Layout ────────────────────────────────────────────────────────
-        lay=QVBoxLayout(self)
+        lay = QVBoxLayout(self)
         lay.addWidget(self.status_label)
         lay.addWidget(self.duration_label)
         lay.addWidget(self.language_label)
@@ -315,7 +649,7 @@ class MainWindow(QWidget):
         lay.addWidget(self.start_button)
         lay.addWidget(self.stop_button)
 
-        # ── 7. Signal connections ────────────────────────────────────────────
+    def _connect_signals(self):
         self.signals.status_changed.connect(self.status_label.setText)
         self.signals.finished.connect(self._on_transcription_finished)
         self.signals.error.connect(self._on_transcription_error)
@@ -326,25 +660,20 @@ class MainWindow(QWidget):
         self.signals.messagebox_requested.connect(self._on_messagebox_requested)
         self.signals.initial_load_complete.connect(self._on_initial_load_complete)
 
-        # ── 8. Background thread — LAST, after every attribute is set ────────
-        threading.Thread(target=self._load_model, daemon=True).start()
+    # ── Model loading (background thread) ────────────────────────────────────
 
-        self.timer=QTimer()
-        self.timer.timeout.connect(self._update_duration)
-        self.timer.start(1000)
-
-    def _load_model(self):
-        should_load_whisper = self._is_whisper_installed()
-        if not should_load_whisper:
+    def _load_models(self):
+        should_load = self.whisper.is_installed()
+        if not should_load:
             self._whisper_setup_event.clear()
             self.signals.whisper_setup_requested.emit()
             self._whisper_setup_event.wait()
-            should_load_whisper = self._whisper_setup_result
+            should_load = self._whisper_setup_result
 
         whisper_ok = False
-        if should_load_whisper:
+        if should_load:
             try:
-                self._load_whisper()
+                self.whisper.load(self.signals.status_changed.emit)
                 self.signals.whisper_ready.emit(True)
                 whisper_ok = True
             except Exception as e:
@@ -360,72 +689,9 @@ class MainWindow(QWidget):
             self.signals.pyannote_ready.emit(False)
         self.signals.initial_load_complete.emit()
 
-    def _is_whisper_installed(self):
-        model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
-        return model_cache.exists()
-
-    def _is_pyannote_installed(self):
-        return self.pyannote.models_exist()
-
-    def _load_whisper(self):
-        model_cache = MODEL_DIR / f"models--Systran--faster-whisper-{MODEL_SIZE}"
-        if model_cache.exists():
-            self.signals.status_changed.emit(f"Loading model ({MODEL_SIZE})...")
-        else:
-            self.signals.status_changed.emit(f"Downloading model ({MODEL_SIZE})...")
-
-        def friendly_error(exc):
-            msg = str(exc)
-            low = msg.lower()
-            if "out of memory" in low or "cuda out of memory" in low:
-                return "GPU memory is insufficient to load the Whisper model."
-            if "cuda" in low or "cudnn" in low or "cublas" in low:
-                return "CUDA initialization failed. Check GPU drivers and CUDA installation."
-            if "404" in low or "not found" in low:
-                return "Whisper model not found."
-            if any(x in low for x in ("download", "connection", "network", "timeout", "ssl")):
-                return "Unable to download the Whisper model. Check your Internet connection."
-            return None
-
-        try:
-            self.model = WhisperModel(
-                MODEL_SIZE,
-                device="cuda",
-                compute_type="float16",
-                download_root=str(MODEL_DIR),
-            )
-            return
-
-        except RuntimeError as e:
-            print(f"[Whisper CUDA] {e}")
-            traceback.print_exc()
-            message = friendly_error(e)
-
-        except OSError as e:
-            print(f"[Whisper CUDA] {e}")
-            traceback.print_exc()
-            message = friendly_error(e)
-
-        except Exception as e:
-            print(f"[Whisper CUDA] {e}")
-            traceback.print_exc()
-            message = friendly_error(e)
-
-        try:
-            self.model = WhisperModel(
-                MODEL_SIZE,
-                device="cpu",
-                compute_type="int8",
-                download_root=str(MODEL_DIR),
-            )
-        except Exception as e:
-            print(f"[Whisper CPU] {e}")
-            traceback.print_exc()
-            raise RuntimeError(message or f"Unable to load the Whisper model.\n\n{e}")
-
     def _initialize_pyannote(self):
         self.signals.status_changed.emit("Loading Pyannote...")
-        if not self._is_pyannote_installed():
+        if not self.pyannote.is_installed():
             if self.pyannote.token_exists():
                 try:
                     self.signals.status_changed.emit("Downloading Pyannote models...")
@@ -449,7 +715,7 @@ class MainWindow(QWidget):
                 if not self._pyannote_setup_result:
                     self.signals.status_changed.emit("Pyannote initialization cancelled")
                     return False
-        if not self._is_pyannote_installed():
+        if not self.pyannote.is_installed():
             return False
         return self._load_pyannote_pipeline()
 
@@ -508,7 +774,7 @@ class MainWindow(QWidget):
         self._whisper_setup_event.wait()
         if self._whisper_setup_result:
             try:
-                self._load_whisper()
+                self.whisper.load(self.signals.status_changed.emit)
                 self._whisper_installing = False
                 self.signals.whisper_ready.emit(True)
             except Exception as e:
@@ -568,32 +834,22 @@ class MainWindow(QWidget):
             e=int(time.monotonic()-self.start_time)
             self.duration_label.setText(f"{e//3600:02}:{(e%3600)//60:02}:{e%60:02}")
 
+    # ── Recording ─────────────────────────────────────────────────────────────
+
     def _start_recording(self):
-        self.speaker_chunks=[]
-        self.mic_chunks=[]
-        self.speaker_error = None
-        self.mic_error = None
-        self.recording=True
-        self.stop_event = threading.Event()
-        self.stop_event.clear()
-        self.start_time=time.monotonic()
+        self.recording = True
+        self.start_time = time.monotonic()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.language_combo.setEnabled(False)
         self.transcribe_checkbox.setEnabled(False)
         self.diarization_checkbox.setEnabled(False)
         self.signals.status_changed.emit("Recording...")
-        self.speaker_thread=threading.Thread(target=self._record_speaker,daemon=True)
-        self.mic_thread=threading.Thread(target=self._record_microphone,daemon=True)
-        self.speaker_thread.start()
-        self.mic_thread.start()
+        self.recorder.start()
 
     def _stop_recording(self):
-        self.recording=False
-        self.stop_event.set()
-        for t in (self.speaker_thread,self.mic_thread):
-            if t and t.is_alive():
-                t.join()
+        self.recording = False
+        self.recorder.stop()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(False)
         self.signals.status_changed.emit("Stopping recording...")
@@ -606,276 +862,7 @@ class MainWindow(QWidget):
             daemon=True,
         ).start()
 
-    def _record_speaker(self):
-        try:
-            import soundcard as sc
-            sp=sc.default_speaker()
-            
-            if sp is None:
-                raise RuntimeError("No default speaker found.")
-            
-            loop=sc.get_microphone(id=str(sp.name),include_loopback=True)
-            with loop.recorder(samplerate=SAMPLE_RATE) as r:
-                while not self.stop_event.is_set():
-                    c=r.record(numframes=CHUNK_SIZE)
-                    if c.ndim>1: c=np.mean(c,axis=1)
-                    self.speaker_chunks.append(c.astype(np.float32))
-        except Exception as e:
-            print(f"[Soundcard Speaker] {type(e).__name__}: {e}")
-            self.speaker_error = str(e)
-            traceback.print_exc()
-
-    def _record_microphone(self):
-        try:
-            import soundcard as sc
-            mic=sc.default_microphone()
-            
-            if mic is None:
-                raise RuntimeError("No default microphone found.")
-            
-            with mic.recorder(samplerate=SAMPLE_RATE) as r:
-                while not self.stop_event.is_set():
-                    c=r.record(numframes=CHUNK_SIZE)
-                    if c.ndim>1: c=np.mean(c,axis=1)
-                    self.mic_chunks.append(c.astype(np.float32))
-        except Exception as e:
-            print(f"[Soundcard Microphone] {type(e).__name__}: {e}")
-            self.mic_error = str(e)
-            traceback.print_exc()
-
-    def _mix_audio(self,speaker_chunks,mic_chunks):
-        sp=np.concatenate(speaker_chunks) if speaker_chunks else np.zeros(0,np.float32)
-        mic=np.concatenate(mic_chunks) if mic_chunks else np.zeros(0,np.float32)
-
-        sp=np.clip(sp*SPEAKER_GAIN,-1,1)
-        mic=np.clip(mic*MIC_GAIN,-1,1)
-
-        n=max(len(sp),len(mic),1)
-        sp=np.pad(sp,(0,n-len(sp)))
-        mic=np.pad(mic,(0,n-len(mic)))
-        mixed = sp + mic
-        
-        peak = np.max(np.abs(mixed))
-        if peak > 1:
-            mixed /= peak
-        mixed *= 0.95
-        
-        return np.clip(mixed,-1,1)
-
-    def _find_best_speaker(self, speaker_segments, start, end):
-        if speaker_segments is None:
-            return None
-
-        center = (start + end) / 2.0
-        min_distance = max(0.03, (end - start) * 0.3)
-
-        best_speaker = None
-        best_distance = None
-
-        for segment, _, speaker in speaker_segments.itertracks(yield_label=True):
-            if segment.start <= center <= segment.end:
-                return speaker
-
-            distance = min(abs(center - segment.start), abs(center - segment.end))
-
-            if best_distance is None or distance < best_distance:
-                best_distance = distance
-                best_speaker = speaker
-
-        if best_distance is not None and best_distance <= min_distance:
-            return best_speaker
-
-        return None
-
-    def _assign_speakers_to_words(self, segments, speaker_segments):
-        words = []
-        last_speaker = None
-        HYSTERESIS_MARGIN = 0.20  # 20%
-
-        for segment in segments:
-            for word in (getattr(segment, "words", None) or []):
-                token = getattr(word, "word", "")
-                if not token:
-                    continue
-
-                start = getattr(word, "start", None)
-                end = getattr(word, "end", None)
-                if start is None or end is None:
-                    continue
-
-                speaker = self._find_best_speaker(speaker_segments, start, end)
-                if speaker is None:
-                    speaker = "UNKNOWN"
-
-                # Hysteresis: avoid changing speaker unless the new one is
-                # significantly closer than the current one.
-                if (
-                    last_speaker is not None
-                    and speaker != last_speaker
-                    and speaker != "UNKNOWN"
-                ):
-                    center = (start + end) / 2.0
-                    current_distance = None
-                    new_distance = None
-
-                    for seg, _, spk in speaker_segments.itertracks(yield_label=True):
-                        distance = min(abs(center - seg.start), abs(center - seg.end))
-                        if seg.start <= center <= seg.end:
-                            distance = 0.0
-
-                        if spk == last_speaker:
-                            if current_distance is None or distance < current_distance:
-                                current_distance = distance
-
-                        if spk == speaker:
-                            if new_distance is None or distance < new_distance:
-                                new_distance = distance
-
-                    if (
-                        current_distance is not None
-                        and new_distance is not None
-                        and current_distance > 0
-                    ):
-                        improvement = (current_distance - new_distance) / current_distance
-                        if improvement < HYSTERESIS_MARGIN:
-                            speaker = last_speaker
-
-                if speaker != "UNKNOWN":
-                    last_speaker = speaker
-
-                words.append({
-                    "speaker": speaker,
-                    "text": token,
-                    "start": start,
-                })
-
-        # Remove isolated one-word speaker changes:
-        # A A A B A A -> A A A A A A
-        if len(words) >= 3:
-            for i in range(1, len(words) - 1):
-                prev_speaker = words[i - 1]["speaker"]
-                curr_speaker = words[i]["speaker"]
-                next_speaker = words[i + 1]["speaker"]
-
-                if (
-                    curr_speaker != prev_speaker
-                    and curr_speaker != next_speaker
-                    and prev_speaker == next_speaker
-                ):
-                    words[i]["speaker"] = prev_speaker
-
-        blocks = []
-        current_speaker = None
-        current_start = None
-        current_parts = []
-
-        for item in words:
-            speaker = item["speaker"]
-            token = item["text"]
-
-            if current_speaker is None:
-                current_speaker = speaker
-                current_start = item["start"]
-                current_parts = [token]
-                continue
-
-            if speaker != current_speaker:
-                blocks.append((current_start, current_speaker, "".join(current_parts).strip()))
-                current_speaker = speaker
-                current_start = item["start"]
-                current_parts = [token]
-            else:
-                current_parts.append(token)
-
-        if current_speaker is not None:
-            blocks.append((current_start, current_speaker, "".join(current_parts).strip()))
-
-        return blocks
-
-    def _create_wav(self, output_dir):
-        errors = []
-        if self.speaker_error:
-            errors.append(f"Speaker/loopback: {self.speaker_error}")
-        elif not self.speaker_chunks:
-            errors.append("Speaker/loopback: no audio captured.")
-
-        if self.mic_error:
-            errors.append(f"Microphone: {self.mic_error}")
-        elif not self.mic_chunks:
-            errors.append("Microphone: no audio captured.")
-
-        if errors:
-            raise RuntimeError("\n".join(errors))
-
-        self.signals.status_changed.emit("Preparing audio...")
-
-        mixed = self._mix_audio(self.speaker_chunks, self.mic_chunks)
-
-        self.speaker_chunks.clear()
-        self.mic_chunks.clear()
-
-        wav = output_dir / "mixed.wav"
-        sf.write(str(wav), mixed, SAMPLE_RATE)
-        return wav
-
-    def _run_whisper_transcription(self, wav, output_dir, language):
-        args = dict(
-            audio=str(wav),
-            beam_size=BEAM_SIZE,
-            vad_filter=VAD,
-            word_timestamps=True,
-        )
-        if language:
-            args["language"] = language
-
-        self.signals.status_changed.emit("Transcribing...")
-        segments, _ = self.model.transcribe(**args)
-        segments = list(segments)
-
-        txt = output_dir / "transcript.txt"
-        with open(txt, "w", encoding="utf-8") as f:
-            for segment in segments:
-                if segment.text.strip():
-                    f.write(
-                        f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n"
-                    )
-
-        return segments, txt
-
-    def _run_diarization(self, wav):
-        waveform, sr = sf.read(str(wav), dtype="float32")
-
-        if waveform.ndim == 1:
-            waveform = waveform[np.newaxis, :]
-        else:
-            waveform = waveform.T
-
-        waveform = torch.from_numpy(waveform)
-
-        self.signals.status_changed.emit("Running speaker diarization...")
-        result = self.pyannote.get_pipeline()(
-            {
-                "waveform": waveform,
-                "sample_rate": sr,
-            }
-        )
-        speaker_segments = result.exclusive_speaker_diarization
-
-        del waveform
-
-        return speaker_segments
-
-    def _save_diarized_transcript(self, segments, speaker_segments, output_dir):
-        blocks = self._assign_speakers_to_words(segments, speaker_segments)
-
-        diarized_txt = output_dir / "transcript_diarized.txt"
-        with open(diarized_txt, "w", encoding="utf-8") as f:
-            for timestamp, speaker, text in blocks:
-                if not text.strip():
-                    continue
-                f.write(f"[{format_timestamp(timestamp)}] [{speaker}] {text}\n\n")
-
-        return diarized_txt
+    # ── Processing ────────────────────────────────────────────────────────────
 
     def _process_recording(self, language, enable_transcription, enable_diarization):
         try:
@@ -883,23 +870,18 @@ class MainWindow(QWidget):
             d = OUTPUT_DIR / ts
             d.mkdir(exist_ok=True)
 
-            wav = self._create_wav(d)
+            wav = self.recorder.save_wav(d, self.signals.status_changed.emit)
 
             if not enable_transcription:
                 self.signals.status_changed.emit("Completed")
                 self.signals.finished.emit(str(d), str(wav))
                 return
 
-            segments, txt = self._run_whisper_transcription(wav, d, language)
-
-            if not enable_diarization:
-                self.signals.finished.emit(str(d), str(txt))
-                return
-
-            speaker_segments = self._run_diarization(wav)
-            diarized_txt = self._save_diarized_transcript(segments, speaker_segments, d)
-
-            self.signals.finished.emit(str(d), str(diarized_txt))
+            result_file = self.engine.process(
+                wav, d, language, enable_diarization,
+                self.signals.status_changed.emit,
+            )
+            self.signals.finished.emit(str(d), str(result_file))
         except Exception as e:
             print(f"[Transcription] {type(e).__name__}: {e}")
             traceback.print_exc()
@@ -925,19 +907,12 @@ class MainWindow(QWidget):
         try:
             if getattr(self, "recording", False):
                 self.recording = False
-
-                if hasattr(self, "stop_event"):
-                    self.stop_event.set()
-
-                for t in (self.speaker_thread, self.mic_thread):
-                    if t and t.is_alive():
-                        t.join(timeout=2)
-
+                self.recorder.stop()
         finally:
             event.accept()
 
-if __name__=="__main__":
-    app=QApplication(sys.argv)
-    w=MainWindow()
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    w = MainWindow()
     w.show()
     sys.exit(app.exec())
