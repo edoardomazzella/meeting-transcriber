@@ -10,6 +10,7 @@ import time
 import os
 import webbrowser
 import json
+import logging
 
 import numpy as np
 import soundfile as sf
@@ -47,6 +48,29 @@ CUDA_BIN_DIR = _cfg["cuda_bin_dir"]
 MODEL_SIZE   = _cfg["model_size"]
 BEAM_SIZE    = int(_cfg["beam_size"])
 VAD          = bool(_cfg["vad"])
+
+# ── Logging ────────────────────────────────────────────────────
+_LOG_DIR = SCRIPT_DIR / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_log_file = _LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)-8s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(_log_file, encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger(__name__)
+
+def _handle_unhandled_exception(exc_type, exc_value, exc_tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    log.critical("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+
+sys.excepthook = _handle_unhandled_exception
 
 if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
@@ -141,8 +165,7 @@ class WhisperManager:
             )
             return
         except Exception as e:
-            print(f"[Whisper CUDA] {e}")
-            traceback.print_exc()
+            log.warning("Whisper CUDA unavailable, falling back to CPU: %s", e, exc_info=True)
             message = friendly_error(e)
 
         try:
@@ -151,14 +174,14 @@ class WhisperManager:
                 download_root=str(self.model_dir),
             )
         except Exception as e:
-            print(f"[Whisper CPU] {e}")
-            traceback.print_exc()
+            log.error("Whisper CPU load failed: %s", e, exc_info=True)
             raise RuntimeError(message or f"Unable to load the Whisper model.\n\n{e}")
 
     def transcribe(self, wav, language=None, on_status=None, cancel_event=None):
         """Transcribe a wav file. Returns a list of segments (may be partial if cancelled)."""
         if on_status:
             on_status("Transcribing...")
+        log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
         args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True)
         if language:
             args["language"] = language
@@ -168,6 +191,9 @@ class WhisperManager:
             if cancel_event and cancel_event.is_set():
                 break
             result.append(segment)
+        log.info("Transcription %s (%d segments)",
+                 "cancelled" if (cancel_event and cancel_event.is_set()) else "completed",
+                 len(result))
         return result
 
 
@@ -323,9 +349,8 @@ class AudioRecorder:
                         c = np.mean(c, axis=1)
                     self._speaker_chunks.append(c.astype(np.float32))
         except Exception as e:
-            print(f"[Soundcard Speaker] {type(e).__name__}: {e}")
+            log.error("Speaker loopback error: %s", e, exc_info=True)
             self.speaker_error = str(e)
-            traceback.print_exc()
 
     def _record_microphone(self):
         try:
@@ -340,9 +365,8 @@ class AudioRecorder:
                         c = np.mean(c, axis=1)
                     self._mic_chunks.append(c.astype(np.float32))
         except Exception as e:
-            print(f"[Soundcard Microphone] {type(e).__name__}: {e}")
+            log.error("Microphone error: %s", e, exc_info=True)
             self.mic_error = str(e)
-            traceback.print_exc()
 
     def _mix(self):
         sp = np.concatenate(self._speaker_chunks) if self._speaker_chunks else np.zeros(0, np.float32)
@@ -405,6 +429,7 @@ class TranscriptionEngine:
         return txt
 
     def _run_diarization(self, wav, on_status=None):
+        log.info("Diarization started (wav=%s)", wav)
         waveform, sr = sf.read(str(wav), dtype="float32")
         if waveform.ndim == 1:
             waveform = waveform[np.newaxis, :]
@@ -416,6 +441,8 @@ class TranscriptionEngine:
         result = self.pyannote.get_pipeline()({"waveform": waveform, "sample_rate": sr})
         speaker_segments = result.exclusive_speaker_diarization
         del waveform
+        speakers = {label for _, _, label in speaker_segments.itertracks(yield_label=True)}
+        log.info("Diarization completed (%d speakers)", len(speakers))
         return speaker_segments
 
     def _save_diarized_transcript(self, segments, speaker_segments, output_dir):
@@ -823,8 +850,7 @@ class MainWindow(QWidget):
                     self.signals.status_changed.emit("Downloading Pyannote models...")
                     self.pyannote.download_models()
                 except Exception as e:
-                    print(f"[Pyannote Download] {type(e).__name__}: {e}")
-                    traceback.print_exc()
+                    log.error("Pyannote download failed: %s", e, exc_info=True)
                     self.pyannote.delete_token()
                     self._pyannote_setup_event.clear()
                     self.signals.pyannote_setup_requested.emit()
@@ -1001,6 +1027,8 @@ class MainWindow(QWidget):
         self.mic_checkbox.setEnabled(False)
         self.speaker_checkbox.setEnabled(False)
         self.signals.status_changed.emit("Recording...")
+        log.info("Recording started (mic=%s, speaker=%s)",
+                 self.mic_checkbox.isChecked(), self.speaker_checkbox.isChecked())
         self.mic_level_widget.setVisible(self.mic_checkbox.isChecked())
         self.speaker_level_widget.setVisible(self.speaker_checkbox.isChecked())
         self.recorder.start(
@@ -1010,6 +1038,9 @@ class MainWindow(QWidget):
         self._level_timer.start()
 
     def _stop_recording(self):
+        elapsed = int(time.monotonic() - self.start_time) if self.start_time else 0
+        log.info("Recording stopped (duration: %02d:%02d:%02d)",
+                 elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60)
         self.recording = False
         self._level_timer.stop()
         self.mic_level_widget.setVisible(False)
@@ -1066,8 +1097,7 @@ class MainWindow(QWidget):
             else:
                 self.signals.finished.emit(str(wav_path.parent), str(result_file))
         except Exception as e:
-            print(f"[WAV Transcription] {type(e).__name__}: {e}")
-            traceback.print_exc()
+            log.error("WAV transcription failed: %s", e, exc_info=True)
             self.signals.error.emit(traceback.format_exc())
     # ── Processing ────────────────────────────────────────────────────────────
 
@@ -1094,8 +1124,7 @@ class MainWindow(QWidget):
             else:
                 self.signals.finished.emit(str(d), str(result_file))
         except Exception as e:
-            print(f"[Transcription] {type(e).__name__}: {e}")
-            traceback.print_exc()
+            log.error("Recording processing failed: %s", e, exc_info=True)
             self.signals.error.emit(traceback.format_exc())
 
     def _on_cancel_clicked(self):
