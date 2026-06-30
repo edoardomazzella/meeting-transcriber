@@ -107,6 +107,17 @@ def format_timestamp(seconds):
     ms = int((seconds - int(seconds)) * 1000)
     return f"{h:02}:{m:02}:{s:02}.{ms:03}"
 
+def _get_audio_devices():
+    """Returns (mics, speakers) as lists of (name, id_str). Empty lists on failure."""
+    try:
+        import soundcard as sc
+        mics     = [(m.name, str(m.id)) for m in sc.all_microphones(include_loopback=False)]
+        speakers = [(s.name, str(s.id)) for s in sc.all_speakers()]
+        return mics, speakers
+    except Exception as e:
+        log.warning("Could not enumerate audio devices: %s", e)
+        return [], []
+
 class Signals(QObject):
     status_changed = Signal(str)
     finished = Signal(str, str)
@@ -286,8 +297,15 @@ class AudioRecorder:
         self._mic_thread = None
         self._enable_speaker = True
         self._enable_mic = True
+        self._speaker_id = None
+        self._mic_id = None
+        self._mic_muted = False
+        self._on_device_error = None
 
-    def start(self, enable_speaker=True, enable_mic=True):
+    def start(self, enable_speaker=True, enable_mic=True, speaker_id=None, mic_id=None, on_device_error=None):
+        self._on_device_error = on_device_error
+        self._speaker_id = speaker_id
+        self._mic_id = mic_id
         self._enable_speaker = enable_speaker
         self._enable_mic = enable_mic
         self._speaker_chunks = []
@@ -309,6 +327,9 @@ class AudioRecorder:
         for t in (self._speaker_thread, self._mic_thread):
             if t and t.is_alive():
                 t.join()
+
+    def mute_mic(self, muted: bool):
+        self._mic_muted = muted
 
     def save_wav(self, output_dir, on_status=None):
         """Validate, mix, and save recorded audio. Returns the wav Path."""
@@ -337,7 +358,12 @@ class AudioRecorder:
     def _record_speaker(self):
         try:
             import soundcard as sc
-            sp = sc.default_speaker()
+            if self._speaker_id:
+                sp = next((s for s in sc.all_speakers() if str(s.id) == self._speaker_id), None)
+                if sp is None:
+                    raise RuntimeError(f"Speaker device not found: {self._speaker_id}")
+            else:
+                sp = sc.default_speaker()
             if sp is None:
                 raise RuntimeError("No default speaker found.")
             loop = sc.get_microphone(id=str(sp.name), include_loopback=True)
@@ -350,11 +376,18 @@ class AudioRecorder:
         except Exception as e:
             log.error("Speaker loopback error: %s", e, exc_info=True)
             self.speaker_error = str(e)
+            if self._on_device_error:
+                self._on_device_error(f"⚠ Speaker device error: {e}")
 
     def _record_microphone(self):
         try:
             import soundcard as sc
-            mic = sc.default_microphone()
+            if self._mic_id:
+                mic = next((m for m in sc.all_microphones() if str(m.id) == self._mic_id), None)
+                if mic is None:
+                    raise RuntimeError(f"Microphone device not found: {self._mic_id}")
+            else:
+                mic = sc.default_microphone()
             if mic is None:
                 raise RuntimeError("No default microphone found.")
             with mic.recorder(samplerate=self.sample_rate) as r:
@@ -362,10 +395,15 @@ class AudioRecorder:
                     c = r.record(numframes=self.chunk_size)
                     if c.ndim > 1:
                         c = np.mean(c, axis=1)
-                    self._mic_chunks.append(c.astype(np.float32))
+                    if self._mic_muted:
+                        self._mic_chunks.append(np.zeros(len(c), np.float32))
+                    else:
+                        self._mic_chunks.append(c.astype(np.float32))
         except Exception as e:
             log.error("Microphone error: %s", e, exc_info=True)
             self.mic_error = str(e)
+            if self._on_device_error:
+                self._on_device_error(f"⚠ Microphone device error: {e}")
 
     def _mix(self):
         sp = np.concatenate(self._speaker_chunks) if self._speaker_chunks else np.zeros(0, np.float32)
@@ -675,7 +713,7 @@ class MainWindow(QWidget):
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle("Meeting Transcriber")
-        self.setFixedSize(400, 520)
+        self.setFixedSize(400, 580)
         self._setup_ui()
 
         # ── 6. Signal connections ─────────────────────────────────────────────
@@ -723,11 +761,25 @@ class MainWindow(QWidget):
         self.speaker_checkbox.setChecked(True)
         self.mic_checkbox.toggled.connect(self._on_source_toggled)
         self.speaker_checkbox.toggled.connect(self._on_source_toggled)
+        _mics, _speakers = _get_audio_devices()
+        self.mic_combo = QComboBox()
+        self.mic_combo.addItem("Default", None)
+        for _name, _dev_id in _mics:
+            self.mic_combo.addItem(_name, _dev_id)
+        self.speaker_combo = QComboBox()
+        self.speaker_combo.addItem("Default", None)
+        for _name, _dev_id in _speakers:
+            self.speaker_combo.addItem(_name, _dev_id)
         self.start_button = QPushButton("Start Recording")
         self.start_button.setProperty("primary", True)
         self.start_button.setEnabled(True)
         self.stop_button = QPushButton("Stop Recording")
         self.stop_button.setEnabled(False)
+        self.mute_mic_button = QPushButton("Mute Mic")
+        self.mute_mic_button.setCheckable(True)
+        self.mute_mic_button.setFixedWidth(110)
+        self.mute_mic_button.setFixedHeight(28)
+        self.mute_mic_button.clicked.connect(self._on_mute_mic_clicked)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setVisible(False)
         self.transcribe_wav_button = QPushButton("Transcribe WAV...")
@@ -752,12 +804,13 @@ class MainWindow(QWidget):
         self.speaker_level_bar.setObjectName("levelBar")
         self.mic_level_widget = QWidget()
         _ml = QHBoxLayout(self.mic_level_widget)
-        _ml.setContentsMargins(0, 0, 0, 0)
+        _ml.setContentsMargins(0, 4, 0, 4)
         _ml.setSpacing(6)
         _mic_lbl = QLabel("Mic")
         _mic_lbl.setFixedWidth(38)
         _ml.addWidget(_mic_lbl)
         _ml.addWidget(self.mic_level_bar)
+        _ml.addWidget(self.mute_mic_button)
         self.mic_level_widget.setVisible(False)
         self.speaker_level_widget = QWidget()
         _sl = QHBoxLayout(self.speaker_level_widget)
@@ -792,8 +845,11 @@ class MainWindow(QWidget):
         left_col.addWidget(self.transcribe_checkbox)
         left_col.addWidget(self.diarization_checkbox)
         right_col = QVBoxLayout()
+        right_col.setSpacing(3)
         right_col.addWidget(self.mic_checkbox)
+        right_col.addWidget(self.mic_combo)
         right_col.addWidget(self.speaker_checkbox)
+        right_col.addWidget(self.speaker_combo)
         chk_row.addLayout(left_col)
         chk_row.addLayout(right_col)
         lay.addLayout(chk_row)
@@ -900,9 +956,10 @@ class MainWindow(QWidget):
         return self.mic_checkbox.isChecked() or self.speaker_checkbox.isChecked()
 
     def _on_source_toggled(self):
-        self.start_button.setEnabled(
-            self._sources_enabled() and not self.recording and not self._processing
-        )
+        unlocked = not self.recording and not self._processing
+        self.start_button.setEnabled(self._sources_enabled() and unlocked)
+        self.mic_combo.setEnabled(self.mic_checkbox.isChecked() and unlocked)
+        self.speaker_combo.setEnabled(self.speaker_checkbox.isChecked() and unlocked)
 
     def _update_controls(self):
         if not self.whisper_ready:
@@ -933,6 +990,8 @@ class MainWindow(QWidget):
         sources_unlocked = not self.recording and not self._processing
         self.mic_checkbox.setEnabled(sources_unlocked)
         self.speaker_checkbox.setEnabled(sources_unlocked)
+        self.mic_combo.setEnabled(sources_unlocked and self.mic_checkbox.isChecked())
+        self.speaker_combo.setEnabled(sources_unlocked and self.speaker_checkbox.isChecked())
 
     def _on_install_whisper_clicked(self):
         self._whisper_installing = True
@@ -1016,6 +1075,12 @@ class MainWindow(QWidget):
         self.mic_level_bar.setValue(mic_level)
         self.speaker_level_bar.setValue(spk_level)
 
+    def _on_mute_mic_clicked(self):
+        is_muted = self.mute_mic_button.isChecked()
+        self.recorder.mute_mic(is_muted)
+        self.mute_mic_button.setText("Unmute Mic" if is_muted else "Mute Mic")
+        log.info("Microphone %s", "muted" if is_muted else "unmuted")
+
     # ── Recording ─────────────────────────────────────────────────────────────
 
     def _start_recording(self):
@@ -1028,6 +1093,8 @@ class MainWindow(QWidget):
         self.diarization_checkbox.setEnabled(False)
         self.mic_checkbox.setEnabled(False)
         self.speaker_checkbox.setEnabled(False)
+        self.mic_combo.setEnabled(False)
+        self.speaker_combo.setEnabled(False)
         self.signals.status_changed.emit("Recording...")
         log.info("Recording started (mic=%s, speaker=%s)",
                  self.mic_checkbox.isChecked(), self.speaker_checkbox.isChecked())
@@ -1036,8 +1103,13 @@ class MainWindow(QWidget):
         self.recorder.start(
             enable_speaker=self.speaker_checkbox.isChecked(),
             enable_mic=self.mic_checkbox.isChecked(),
+            speaker_id=self.speaker_combo.currentData(),
+            mic_id=self.mic_combo.currentData(),
+            on_device_error=self.signals.status_changed.emit,
         )
         self._level_timer.start()
+        self.mute_mic_button.setChecked(False)
+        self.mute_mic_button.setText("Mute Mic")
 
     def _stop_recording(self):
         elapsed = int(time.monotonic() - self.start_time) if self.start_time else 0
@@ -1047,6 +1119,7 @@ class MainWindow(QWidget):
         self._level_timer.stop()
         self.mic_level_widget.setVisible(False)
         self.speaker_level_widget.setVisible(False)
+        self.recorder.mute_mic(False)
         self.recorder.stop()
         self._cancel_event.clear()
         self._processing = True
@@ -1219,6 +1292,11 @@ def _apply_style(app):
         }}
         QPushButton:pressed {{
             background-color: #DCDCDC;
+        }}
+        QPushButton:checked {{
+            background-color: #FFE0CC;
+            border-color: {_ACCENT_P};
+            color: {_ACCENT_P};
         }}
         QPushButton:disabled {{
             background-color: #F5F5F5;
