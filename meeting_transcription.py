@@ -51,10 +51,6 @@ MODEL_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR = SCRIPT_DIR / "recordings"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Gain applied before mixing
-SPEAKER_GAIN = 1.0
-MIC_GAIN = 1.0
-
 # Whisper model
 MODEL_SIZE = "medium" # small, medium, large-v3, large-v3-turbo
 
@@ -62,7 +58,7 @@ MODEL_SIZE = "medium" # small, medium, large-v3, large-v3-turbo
 BEAM_SIZE = 5
 
 # Voice Activity Detection: when turned on, audio is not analyzed in case of silence.
-VAD = False
+VAD = True
 
 def format_timestamp(seconds):
     h = int(seconds // 3600)
@@ -236,12 +232,9 @@ class PyannoteManager:
 class AudioRecorder:
     """Captures speaker loopback + microphone audio on separate threads."""
 
-    def __init__(self, sample_rate=SAMPLE_RATE, chunk_size=CHUNK_SIZE,
-                 speaker_gain=SPEAKER_GAIN, mic_gain=MIC_GAIN):
+    def __init__(self, sample_rate=SAMPLE_RATE, chunk_size=CHUNK_SIZE):
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
-        self.speaker_gain = speaker_gain
-        self.mic_gain = mic_gain
         self._speaker_chunks = []
         self._mic_chunks = []
         self.speaker_error = None
@@ -337,8 +330,6 @@ class AudioRecorder:
     def _mix(self):
         sp = np.concatenate(self._speaker_chunks) if self._speaker_chunks else np.zeros(0, np.float32)
         mic = np.concatenate(self._mic_chunks) if self._mic_chunks else np.zeros(0, np.float32)
-        sp = np.clip(sp * self.speaker_gain, -1, 1)
-        mic = np.clip(mic * self.mic_gain, -1, 1)
         n = max(len(sp), len(mic), 1)
         sp = np.pad(sp, (0, n - len(sp)))
         mic = np.pad(mic, (0, n - len(mic)))
