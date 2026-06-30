@@ -23,6 +23,7 @@ if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
 
 from faster_whisper import WhisperModel
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
+from PySide6.QtGui import QPalette, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QMessageBox, QComboBox,
@@ -652,6 +653,7 @@ class MainWindow(QWidget):
         self.diarization_checkbox = QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setEnabled(False)
         self.start_button = QPushButton("Start Recording")
+        self.start_button.setProperty("primary", True)
         self.start_button.setEnabled(True)
         self.stop_button = QPushButton("Stop Recording")
         self.stop_button.setEnabled(False)
@@ -1032,8 +1034,115 @@ class MainWindow(QWidget):
         finally:
             event.accept()
 
+def _apply_style(app):
+    _ACCENT   = "#0078D4"
+    _ACCENT_H = "#106EBE"
+    _ACCENT_P = "#005A9E"
+    _BG       = "#F3F3F3"
+    _SURFACE  = "#FFFFFF"
+    _TEXT     = "#1A1A1A"
+    _BORDER   = "#D1D1D1"
+
+    app.setStyle("Fusion")
+
+    pal = QPalette()
+    pal.setColor(QPalette.Window,          QColor(_BG))
+    pal.setColor(QPalette.WindowText,      QColor(_TEXT))
+    pal.setColor(QPalette.Base,            QColor(_SURFACE))
+    pal.setColor(QPalette.AlternateBase,   QColor(_BG))
+    pal.setColor(QPalette.Text,            QColor(_TEXT))
+    pal.setColor(QPalette.Button,          QColor(_SURFACE))
+    pal.setColor(QPalette.ButtonText,      QColor(_TEXT))
+    pal.setColor(QPalette.Highlight,       QColor(_ACCENT))
+    pal.setColor(QPalette.HighlightedText, QColor("#FFFFFF"))
+    pal.setColor(QPalette.Disabled, QPalette.Text,       QColor("#AAAAAA"))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#AAAAAA"))
+    app.setPalette(pal)
+
+    app.setStyleSheet(f"""
+        QWidget {{
+            font-size: 10pt;
+        }}
+        QPushButton {{
+            border: 1px solid {_BORDER};
+            border-radius: 4px;
+            padding: 5px 14px;
+            background-color: {_SURFACE};
+            color: {_TEXT};
+            min-height: 22px;
+        }}
+        QPushButton:hover {{
+            background-color: #EBEBEB;
+            border-color: #ABABAB;
+        }}
+        QPushButton:pressed {{
+            background-color: #DCDCDC;
+        }}
+        QPushButton:disabled {{
+            background-color: #F5F5F5;
+            color: #AAAAAA;
+            border-color: #E5E5E5;
+        }}
+        QPushButton[primary=true] {{
+            background-color: {_ACCENT};
+            color: #FFFFFF;
+            border: none;
+        }}
+        QPushButton[primary=true]:hover {{
+            background-color: {_ACCENT_H};
+        }}
+        QPushButton[primary=true]:pressed {{
+            background-color: {_ACCENT_P};
+        }}
+        QPushButton[primary=true]:disabled {{
+            background-color: #B0CEED;
+            color: #FFFFFF;
+        }}
+        QProgressBar {{
+            border: none;
+            border-radius: 3px;
+            background-color: #E0E0E0;
+        }}
+        QProgressBar::chunk {{
+            background-color: {_ACCENT};
+            border-radius: 3px;
+        }}
+        QComboBox {{
+            border: 1px solid {_BORDER};
+            border-radius: 4px;
+            padding: 4px 8px;
+            background-color: {_SURFACE};
+            min-height: 22px;
+        }}
+        QComboBox:hover {{ border-color: {_ACCENT}; }}
+        QComboBox:disabled {{ background-color: #F5F5F5; color: #AAAAAA; }}
+        QLineEdit {{
+            border: 1px solid {_BORDER};
+            border-radius: 4px;
+            padding: 4px 8px;
+            background-color: {_SURFACE};
+            min-height: 22px;
+        }}
+        QLineEdit:focus {{ border-color: {_ACCENT}; }}
+        QCheckBox::indicator {{
+            width: 16px;
+            height: 16px;
+            border: 1px solid {_BORDER};
+            border-radius: 3px;
+            background-color: {_SURFACE};
+        }}
+        QCheckBox::indicator:checked {{
+            background-color: {_ACCENT};
+            border-color: {_ACCENT};
+            image: none;
+        }}
+        QCheckBox::indicator:disabled {{ background-color: #F0F0F0; }}
+    """)
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    _apply_style(app)
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
