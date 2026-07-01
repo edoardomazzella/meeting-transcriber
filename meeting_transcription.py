@@ -56,6 +56,34 @@ MODEL_SIZE   = _cfg["model_size"]
 BEAM_SIZE    = int(_cfg["beam_size"])
 VAD          = bool(_cfg["vad"])
 
+_SETTINGS_FILE = SCRIPT_DIR / "settings.json"
+_SETTINGS_DEFAULTS = {
+    "transcribe":      True,
+    "diarization":     False,
+    "mic_enabled":     True,
+    "speaker_enabled": True,
+    "language":        None,
+    "mic_device":      None,
+    "speaker_device":  None,
+}
+
+def _load_settings():
+    if _SETTINGS_FILE.exists():
+        try:
+            with open(_SETTINGS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return {**_SETTINGS_DEFAULTS, **data}
+        except Exception:
+            pass
+    return dict(_SETTINGS_DEFAULTS)
+
+def _combo_set_data(combo, value):
+    """Select the combo item whose data matches value; no-op if not found."""
+    for i in range(combo.count()):
+        if combo.itemData(i) == value:
+            combo.setCurrentIndex(i)
+            return
+
 # ── Logging ────────────────────────────────────────────────────
 _LOG_DIR = SCRIPT_DIR / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
@@ -790,6 +818,7 @@ class MainWindow(QWidget):
         self.setWindowTitle(f"Meeting Transcriber v{__version__}")
         self.setFixedSize(400, 580)
         self._setup_ui()
+        self._apply_settings(_load_settings())
 
         # ── 6. Signal connections ─────────────────────────────────────────────
         self._connect_signals()
@@ -1320,11 +1349,37 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event):
         try:
+            self._save_settings()
             if getattr(self, "recording", False):
                 self.recording = False
                 self.recorder.stop()
         finally:
             event.accept()
+
+    def _save_settings(self):
+        s = {
+            "transcribe":      self.transcribe_checkbox.isChecked(),
+            "diarization":     self.diarization_checkbox.isChecked(),
+            "mic_enabled":     self.mic_checkbox.isChecked(),
+            "speaker_enabled": self.speaker_checkbox.isChecked(),
+            "language":        self.language_combo.currentData(),
+            "mic_device":      self.mic_combo.currentData(),
+            "speaker_device":  self.speaker_combo.currentData(),
+        }
+        try:
+            with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(s, f, indent=4)
+        except Exception:
+            log.warning("Could not save settings", exc_info=True)
+
+    def _apply_settings(self, s):
+        self.transcribe_checkbox.setChecked(s["transcribe"])
+        self.diarization_checkbox.setChecked(s["diarization"])
+        self.mic_checkbox.setChecked(s["mic_enabled"])
+        self.speaker_checkbox.setChecked(s["speaker_enabled"])
+        _combo_set_data(self.language_combo, s["language"])
+        _combo_set_data(self.mic_combo, s["mic_device"])
+        _combo_set_data(self.speaker_combo, s["speaker_device"])
 
 def _apply_style(app):
     _ACCENT   = "#0078D4"
