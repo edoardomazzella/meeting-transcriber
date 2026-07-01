@@ -28,7 +28,7 @@ _CONFIG_DEFAULTS = {
     "cuda_bin_dir": r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
     "model_size":   "medium",
     "beam_size":    5,
-    "vad":          False,
+    "vad":          True,
 }
 
 def _load_config():
