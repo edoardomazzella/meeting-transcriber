@@ -6,9 +6,15 @@ echo  Meeting Transcriber - Installer
 echo ============================================
 echo.
 
-:: Check Python
-python --version >nul 2>&1
-if errorlevel 1 (
+:: Trova il comando Python corretto (py = Python Launcher, python = fallback)
+set PYTHON_CMD=
+py --version >nul 2>&1
+if not errorlevel 1 set PYTHON_CMD=py
+if "%PYTHON_CMD%"=="" (
+    python --version >nul 2>&1
+    if not errorlevel 1 set PYTHON_CMD=python
+)
+if "%PYTHON_CMD%"=="" (
     echo [ERRORE] Python non trovato.
     echo Scarica Python 3.10 o superiore da https://www.python.org/downloads/
     echo Assicurati di spuntare "Add Python to PATH" durante l'installazione.
@@ -18,7 +24,7 @@ if errorlevel 1 (
 )
 
 echo Versione Python rilevata:
-python --version
+%PYTHON_CMD% --version
 echo.
 
 :: Ask GPU or CPU
@@ -32,11 +38,11 @@ set /p SCELTA="Scegli (1 o 2): "
 if "%SCELTA%"=="1" (
     echo.
     echo Installazione dipendenze GPU...
-    python -m pip install -r requirements-gpu.txt
+    %PYTHON_CMD% -m pip install -r requirements-gpu.txt
 ) else if "%SCELTA%"=="2" (
     echo.
     echo Installazione dipendenze CPU...
-    python -m pip install -r requirements-cpu.txt
+    %PYTHON_CMD% -m pip install -r requirements-cpu.txt
 ) else (
     echo.
     echo Scelta non valida. Esegui di nuovo install.bat.
