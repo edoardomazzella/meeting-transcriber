@@ -6,7 +6,7 @@ echo  Meeting Transcriber - Installer
 echo ============================================
 echo.
 
-:: Trova il comando Python corretto (py = Python Launcher, python = fallback)
+:: Find the correct Python command (py = Python Launcher, python = fallback)
 set PYTHON_CMD=
 py --version >nul 2>&1
 if not errorlevel 1 set PYTHON_CMD=py
@@ -15,52 +15,52 @@ if "%PYTHON_CMD%"=="" (
     if not errorlevel 1 set PYTHON_CMD=python
 )
 if "%PYTHON_CMD%"=="" (
-    echo [ERRORE] Python non trovato.
-    echo Scarica Python 3.10 o superiore da https://www.python.org/downloads/
-    echo Assicurati di spuntare "Add Python to PATH" durante l'installazione.
+    echo [ERROR] Python not found.
+    echo Download Python 3.10 or later from https://www.python.org/downloads/
+    echo Make sure to check "Add Python to PATH" during installation.
     echo.
     pause
     exit /b 1
 )
 
-echo Versione Python rilevata:
+echo Python version detected:
 %PYTHON_CMD% --version
 echo.
 
 :: Ask GPU or CPU
-echo Hai una GPU NVIDIA con CUDA?
+echo Do you have an NVIDIA GPU with CUDA?
 echo.
-echo   [1] Si  - installa con supporto GPU (consigliato se hai una GPU NVIDIA)
-echo   [2] No  - installa solo CPU
+echo   [1] Yes - install with GPU support (recommended if you have an NVIDIA GPU)
+echo   [2] No  - install CPU-only
 echo.
-set /p SCELTA="Scegli (1 o 2): "
+set /p CHOICE="Choose (1 or 2): "
 
-if "%SCELTA%"=="1" (
+if "%CHOICE%"=="1" (
     echo.
-    echo Installazione dipendenze GPU...
+    echo Installing GPU dependencies...
     %PYTHON_CMD% -m pip install -r requirements-gpu.txt
-) else if "%SCELTA%"=="2" (
+) else if "%CHOICE%"=="2" (
     echo.
-    echo Installazione dipendenze CPU...
+    echo Installing CPU dependencies...
     %PYTHON_CMD% -m pip install -r requirements-cpu.txt
 ) else (
     echo.
-    echo Scelta non valida. Esegui di nuovo install.bat.
+    echo Invalid choice. Please run install.bat again.
     pause
     exit /b 1
 )
 
 if errorlevel 1 (
     echo.
-    echo [ERRORE] Installazione fallita. Controlla la connessione Internet e riprova.
+    echo [ERROR] Installation failed. Check your Internet connection and try again.
     pause
     exit /b 1
 )
 
 echo.
 echo ============================================
-echo  Installazione completata.
-echo  Avvia l'app con: run.bat
+echo  Installation complete.
+echo  Launch the app with: run.bat
 echo ============================================
 echo.
 pause

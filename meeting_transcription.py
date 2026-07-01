@@ -93,7 +93,7 @@ except OSError:
     import ctypes
     ctypes.windll.user32.MessageBoxW(
         0,
-        "Meeting Transcriber è già in esecuzione.",
+        "Meeting Transcriber is already running.",
         "Meeting Transcriber",
         0x30,  # MB_ICONWARNING
     )
