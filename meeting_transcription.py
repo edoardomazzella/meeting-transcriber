@@ -551,14 +551,15 @@ class TranscriptionEngine:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return path.with_stem(f"{path.stem}_{ts}")
 
-    def _find_best_speaker(self, speaker_segments, start, end):
-        if speaker_segments is None:
+    def _find_best_speaker(self, tracks, start, end):
+        """tracks: pre-materialized list of (segment, _, speaker) from itertracks."""
+        if not tracks:
             return None
         center = (start + end) / 2.0
         min_distance = max(0.03, (end - start) * 0.3)
         best_speaker = None
         best_distance = None
-        for segment, _, speaker in speaker_segments.itertracks(yield_label=True):
+        for segment, _, speaker in tracks:
             if segment.start <= center <= segment.end:
                 return speaker
             distance = min(abs(center - segment.start), abs(center - segment.end))
@@ -574,6 +575,9 @@ class TranscriptionEngine:
         last_speaker = None
         HYSTERESIS_MARGIN = 0.20  # 20%
 
+        # Materialise once — avoids recreating the iterator for every word
+        tracks = list(speaker_segments.itertracks(yield_label=True))
+
         for segment in segments:
             for word in (getattr(segment, "words", None) or []):
                 token = getattr(word, "word", "")
@@ -584,7 +588,7 @@ class TranscriptionEngine:
                 if start is None or end is None:
                     continue
 
-                speaker = self._find_best_speaker(speaker_segments, start, end)
+                speaker = self._find_best_speaker(tracks, start, end)
                 if speaker is None:
                     speaker = "UNKNOWN"
 
@@ -598,7 +602,7 @@ class TranscriptionEngine:
                     center = (start + end) / 2.0
                     current_distance = None
                     new_distance = None
-                    for seg, _, spk in speaker_segments.itertracks(yield_label=True):
+                    for seg, _, spk in tracks:
                         distance = min(abs(center - seg.start), abs(center - seg.end))
                         if seg.start <= center <= seg.end:
                             distance = 0.0
