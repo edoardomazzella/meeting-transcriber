@@ -133,7 +133,7 @@ if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.environ["PATH"] = CUDA_BIN_DIR + ";" + os.environ["PATH"]
 
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QPalette, QColor, QFont
+from PySide6.QtGui import QPalette, QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel,
     QVBoxLayout, QHBoxLayout, QMessageBox, QComboBox,
@@ -1504,9 +1504,42 @@ def _apply_style(app):
     """)
 
 
+def _make_app_icon():
+    """Build a waveform icon in-memory using PySide6 — no external files needed."""
+    from PySide6.QtGui import QPainter, QPixmap
+    icon = QIcon()
+    for size in (16, 32, 48, 64):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        p = QPainter(pixmap)
+        p.setRenderHint(QPainter.Antialiasing)
+        # Blue rounded background
+        p.setBrush(QColor("#0078D4"))
+        p.setPen(Qt.NoPen)
+        radius = max(2, size // 6)
+        p.drawRoundedRect(0, 0, size, size, radius, radius)
+        # White waveform bars (left, center, right)
+        p.setBrush(QColor("white"))
+        bw  = max(2, size * 8 // 64)   # bar width
+        gap = max(1, size * 5 // 64)   # gap between bars
+        cx  = size // 2
+        heights = [size * 22 // 64, size * 36 // 64, size * 22 // 64]
+        xs      = [cx - bw - gap - bw // 2, cx - bw // 2, cx + gap + bw // 2]
+        br      = max(1, bw // 2)
+        for x, h in zip(xs, heights):
+            y = (size - h) // 2
+            p.drawRoundedRect(x, y, bw, h, br, br)
+        p.end()
+        icon.addPixmap(pixmap)
+    return icon
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     _apply_style(app)
+    icon = _make_app_icon()
+    app.setWindowIcon(icon)
     w = MainWindow()
+    w.setWindowIcon(icon)
     w.show()
     sys.exit(app.exec())
