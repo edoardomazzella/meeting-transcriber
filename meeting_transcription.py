@@ -15,6 +15,13 @@ import numpy as np
 import soundfile as sf
 import torch
 
+try:
+    import keyring as _keyring
+    _KEYRING_AVAILABLE = True
+except ImportError:
+    _keyring = None
+    _KEYRING_AVAILABLE = False
+
 # ── Paths & configuration ────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).resolve().parent
 MODEL_DIR  = SCRIPT_DIR / "models"
@@ -70,6 +77,12 @@ def _handle_unhandled_exception(exc_type, exc_value, exc_tb):
 
 sys.excepthook = _handle_unhandled_exception
 
+if not _KEYRING_AVAILABLE:
+    log.warning("keyring package not found — HuggingFace token will be stored as plain text. Install with: pip install keyring")
+
+_KEYRING_SERVICE  = "MeetingTranscription"
+_KEYRING_USERNAME = "huggingface_token"
+
 if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
     os.environ["PATH"] = CUDA_BIN_DIR + ";" + os.environ["PATH"]
@@ -88,6 +101,8 @@ logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
 
 warnings.filterwarnings("ignore", message=r"TensorFloat-32", module=r"pyannote\.audio")
 warnings.filterwarnings("ignore", message=r"std\(\): degrees of freedom is <= 0", category=UserWarning)
+warnings.filterwarnings("ignore", message=r"Mean of empty slice", category=RuntimeWarning)
+warnings.filterwarnings("ignore", message=r"invalid value encountered in divide", category=RuntimeWarning)
 
 try:
     with warnings.catch_warnings():
@@ -213,8 +228,19 @@ class PyannoteManager:
         self.base_dir = Path(base_dir)
         self.models_dir = self.base_dir / "pyannote"
         self.models_dir.mkdir(parents=True, exist_ok=True)
-        self.token_file = self.models_dir / "token.txt"
+        self.token_file = self.models_dir / "token.txt"  # fallback / migration only
         self.pipeline = None
+
+        # Migrate plain-text token to keyring on first run
+        if _KEYRING_AVAILABLE and self.token_file.exists():
+            try:
+                old_token = self.token_file.read_text(encoding="utf-8").strip()
+                if old_token:
+                    _keyring.set_password(_KEYRING_SERVICE, _KEYRING_USERNAME, old_token)
+                    log.info("HuggingFace token migrated to system keyring")
+                self.token_file.unlink()
+            except Exception:
+                log.warning("Could not migrate token to keyring", exc_info=True)
 
     def is_installed(self):
         required = self.models_dir / "models--pyannote--speaker-diarization"
@@ -223,18 +249,41 @@ class PyannoteManager:
         return any(p.is_dir() and p.name.startswith("models--pyannote") for p in self.models_dir.iterdir())
 
     def token_exists(self):
+        if _KEYRING_AVAILABLE:
+            try:
+                return _keyring.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME) is not None
+            except Exception:
+                log.warning("keyring.get_password failed", exc_info=True)
         return self.token_file.exists()
 
     def load_token(self):
-        if not self.token_exists():
-            return None
-        return self.token_file.read_text(encoding="utf-8").strip()
+        if _KEYRING_AVAILABLE:
+            try:
+                token = _keyring.get_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
+                if token:
+                    return token
+            except Exception:
+                log.warning("keyring.get_password failed, trying file fallback", exc_info=True)
+        if self.token_file.exists():
+            return self.token_file.read_text(encoding="utf-8").strip()
+        return None
 
     def save_token(self, token):
+        if _KEYRING_AVAILABLE:
+            try:
+                _keyring.set_password(_KEYRING_SERVICE, _KEYRING_USERNAME, token.strip())
+                return
+            except Exception:
+                log.warning("keyring.set_password failed, falling back to file", exc_info=True)
         self.token_file.write_text(token.strip(), encoding="utf-8")
 
     def delete_token(self):
-        if self.token_exists():
+        if _KEYRING_AVAILABLE:
+            try:
+                _keyring.delete_password(_KEYRING_SERVICE, _KEYRING_USERNAME)
+            except Exception:
+                log.warning("keyring.delete_password failed", exc_info=True)
+        if self.token_file.exists():
             self.token_file.unlink()
 
     def download_models(self):
