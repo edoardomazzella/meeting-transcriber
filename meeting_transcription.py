@@ -2,7 +2,6 @@
 # Meeting Transcriber
 import sys
 import threading
-import traceback
 import warnings
 from pathlib import Path
 from datetime import datetime
@@ -675,6 +674,7 @@ class PyannoteSetupDialog(QDialog):
             self.manager.save_token(token)
             self.manager.download_models()
         except Exception as e:
+            log.error("Pyannote download failed in dialog: %s", e, exc_info=True)
             self.download_button.setEnabled(True)
             QMessageBox.critical(self, "Download failed", str(e))
             return
@@ -888,6 +888,7 @@ class MainWindow(QWidget):
                 self.signals.whisper_ready.emit(True)
                 whisper_ok = True
             except Exception as e:
+                log.error("Whisper load failed: %s", e, exc_info=True)
                 self.signals.whisper_ready.emit(False)
                 self.signals.messagebox_requested.emit("critical", "Whisper Error", str(e))
         else:
@@ -1010,6 +1011,7 @@ class MainWindow(QWidget):
                 self.signals.progress_visible.emit(False)
                 self.signals.whisper_ready.emit(True)
             except Exception as e:
+                log.error("Whisper install/load failed: %s", e, exc_info=True)
                 self._whisper_installing = False
                 self.signals.progress_visible.emit(False)
                 self.signals.whisper_ready.emit(False)
@@ -1049,7 +1051,7 @@ class MainWindow(QWidget):
             dlg = PyannoteSetupDialog(self.pyannote, self)
             self._pyannote_setup_result = (dlg.exec() == QDialog.Accepted)
         except Exception:
-            traceback.print_exc()
+            log.exception("PyannoteSetupDialog error")
             self._pyannote_setup_result = False
         finally:
             self._pyannote_setup_event.set()
@@ -1173,7 +1175,7 @@ class MainWindow(QWidget):
                 self.signals.finished.emit(str(wav_path.parent), str(result_file))
         except Exception as e:
             log.error("WAV transcription failed: %s", e, exc_info=True)
-            self.signals.error.emit(traceback.format_exc())
+            self.signals.error.emit(str(e))
     # ── Processing ────────────────────────────────────────────────────────────
 
     def _process_recording(self, language, enable_transcription, enable_diarization):
@@ -1200,7 +1202,7 @@ class MainWindow(QWidget):
                 self.signals.finished.emit(str(d), str(result_file))
         except Exception as e:
             log.error("Recording processing failed: %s", e, exc_info=True)
-            self.signals.error.emit(traceback.format_exc())
+            self.signals.error.emit(str(e))
 
     def _on_cancel_clicked(self):
         self._cancel_event.set()
