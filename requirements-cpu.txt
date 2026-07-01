@@ -1,0 +1,11 @@
+# Meeting Transcriber — CPU-only dependencies
+# Install with: pip install -r requirements-cpu.txt
+
+torch
+PySide6
+faster-whisper
+pyannote.audio
+soundcard
+soundfile
+numpy
+keyring

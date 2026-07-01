@@ -1,5 +1,7 @@
 
 # Meeting Transcriber
+__version__ = "1.0.0"
+
 import sys
 import threading
 import warnings
@@ -13,7 +15,6 @@ import logging
 
 import numpy as np
 import soundfile as sf
-import torch
 
 try:
     import keyring as _keyring
@@ -87,7 +88,6 @@ if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
     os.environ["PATH"] = CUDA_BIN_DIR + ";" + os.environ["PATH"]
 
-from faster_whisper import WhisperModel
 from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtGui import QPalette, QColor, QFont
 from PySide6.QtWidgets import (
@@ -176,6 +176,8 @@ class WhisperManager:
 
         message = None
         try:
+            from faster_whisper import WhisperModel
+            logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
             self.model = WhisperModel(
                 MODEL_SIZE, device="cuda", compute_type="float16",
                 download_root=str(self.model_dir),
@@ -186,6 +188,7 @@ class WhisperManager:
             message = friendly_error(e)
 
         try:
+            from faster_whisper import WhisperModel
             self.model = WhisperModel(
                 MODEL_SIZE, device="cpu", compute_type="int8",
                 download_root=str(self.model_dir),
@@ -314,6 +317,7 @@ class PyannoteManager:
                 from pyannote.audio import Pipeline
         except ImportError:
             raise RuntimeError("Pyannote not available.")
+        import torch
         token = self.load_token()
         self.pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-community-1",
@@ -518,6 +522,7 @@ class TranscriptionEngine:
         return txt
 
     def _run_diarization(self, wav, on_status=None):
+        import torch
         log.info("Diarization started (wav=%s)", wav)
         waveform, sr = sf.read(str(wav), dtype="float32")
         if waveform.ndim == 1:
@@ -766,7 +771,7 @@ class MainWindow(QWidget):
         self._cancel_event = threading.Event()
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
-        self.setWindowTitle("Meeting Transcriber")
+        self.setWindowTitle(f"Meeting Transcriber v{__version__}")
         self.setFixedSize(400, 580)
         self._setup_ui()
 
