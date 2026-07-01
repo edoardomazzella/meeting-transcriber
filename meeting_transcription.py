@@ -104,13 +104,6 @@ warnings.filterwarnings("ignore", message=r"std\(\): degrees of freedom is <= 0"
 warnings.filterwarnings("ignore", message=r"Mean of empty slice", category=RuntimeWarning)
 warnings.filterwarnings("ignore", message=r"invalid value encountered in divide", category=RuntimeWarning)
 
-try:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
-        from pyannote.audio import Pipeline
-except Exception:
-    Pipeline = None
-
 SAMPLE_RATE = 16000
 CHUNK_SIZE  = 4096
 
@@ -287,7 +280,11 @@ class PyannoteManager:
             self.token_file.unlink()
 
     def download_models(self):
-        if Pipeline is None:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
+                from pyannote.audio import Pipeline
+        except ImportError:
             raise RuntimeError("Pyannote is not installed.")
 
         token = self.load_token()
@@ -311,7 +308,11 @@ class PyannoteManager:
             raise
 
     def _initialize_pipeline(self):
-        if Pipeline is None:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
+                from pyannote.audio import Pipeline
+        except ImportError:
             raise RuntimeError("Pyannote not available.")
         token = self.load_token()
         self.pipeline = Pipeline.from_pretrained(
