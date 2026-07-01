@@ -84,6 +84,22 @@ if not _KEYRING_AVAILABLE:
 _KEYRING_SERVICE  = "MeetingTranscription"
 _KEYRING_USERNAME = "huggingface_token"
 
+# ── Single instance guard ─────────────────────────────────────────────────────
+import socket as _socket
+_instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+try:
+    _instance_lock.bind(("127.0.0.1", 47832))
+except OSError:
+    import ctypes
+    ctypes.windll.user32.MessageBoxW(
+        0,
+        "Meeting Transcriber è già in esecuzione.",
+        "Meeting Transcriber",
+        0x30,  # MB_ICONWARNING
+    )
+    log.warning("Second instance blocked — app already running")
+    sys.exit(0)
+
 if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
     os.environ["PATH"] = CUDA_BIN_DIR + ";" + os.environ["PATH"]
