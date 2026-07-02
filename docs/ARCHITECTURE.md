@@ -387,6 +387,7 @@ The **Architecture Ref** column contains section numbers within *this document*:
 | F-23 | Diarized transcript with speaker labels | TranscriptionEngine | §3.3 |
 | F-24 | Audio saved alongside transcripts | AudioRecorder, MainWindow | §3.3 |
 | F-25 | Existing output files never overwritten | TranscriptionEngine | §3.3 |
+| F-35 | Open output folder from completion dialog | MainWindow | §3.3 |
 | F-26 | Prompt to download Whisper on first run | MainWindow, Signals | §3.1 |
 | F-27 | Auto-download pyannote if token present | MainWindow, DiarizationEngine | §3.1 |
 | F-28 | Guided token entry procedure | PyannoteSetupDialog | §3.1, §3.4 |

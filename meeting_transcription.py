@@ -1334,7 +1334,15 @@ class MainWindow(QWidget):
         self.stop_button.setEnabled(False)
         self._processing = False
         self._update_controls()
-        QMessageBox.information(self,"Completed",f"Folder:\n{folder}\n\nTranscript:\n{file}")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Completed")
+        msg.setText(f"Folder:\n{folder}\n\nTranscript:\n{file}")
+        msg.setIcon(QMessageBox.Icon.Information)
+        open_btn = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Ok)
+        msg.exec()
+        if msg.clickedButton() is open_btn:
+            os.startfile(folder)
 
     def _on_transcription_error(self, message):
         self.progress_bar.setVisible(False)

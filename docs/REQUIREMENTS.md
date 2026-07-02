@@ -72,6 +72,7 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 | F-23 | When speaker identification is enabled, the system shall produce a separate transcript file including speaker labels |
 | F-24 | The recorded audio shall be saved alongside the transcript files |
 | F-25 | Existing output files shall never be overwritten |
+| F-35 | Upon processing completion the user shall be offered the option to open the output folder directly from the notification dialog |
 
 ### 3.5 Model & Token Management
 

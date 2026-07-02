@@ -635,7 +635,7 @@ Same pipeline as `_process_recording` but for a user-selected WAV file.
 | `_on_whisper_setup_requested()` | `whisper_setup_requested` | Shows QMessageBox; sets `_whisper_setup_result` and releases `_whisper_setup_event` |
 | `_on_pyannote_setup_requested()` | `pyannote_setup_requested` | Opens `PyannoteSetupDialog`; sets `_pyannote_setup_result` and releases `_pyannote_setup_event` |
 | `_on_messagebox_requested(kind, title, msg)` | `messagebox_requested` | Shows a modal dialog of the requested type |
-| `_on_finished(folder, file)` | `finished` | Resets processing state; shows completion dialog |
+| `_on_transcription_finished(folder, file)` | `finished` | Resets processing state; shows completion dialog with **Open Folder** and **Ok** buttons; if Open Folder is clicked calls `os.startfile(folder)` (F-35) |
 | `_on_cancelled(folder)` | `cancelled` | Resets processing state; shows cancellation message |
 | `_on_transcription_error(msg)` | `error` | Resets processing state; shows error dialog |
 | `_on_cancel_clicked()` | — | Sets `_cancel_event`; disables Cancel button |
@@ -865,7 +865,7 @@ This section provides full, function-level traceability from every element of `A
 | Write `transcript.txt` | `TranscriptionEngine._save_transcript()` §6.2 |
 | Write `transcript_diarized.txt` | `TranscriptionEngine._save_diarized_transcript()` §6.2 |
 | Emit `finished` | `MainWindow._process_recording()` §8.5 → `Signals.finished` §2.1 |
-| Handle `finished` — show dialog | `MainWindow._on_finished()` §8.7 |
+| Handle `finished` — show dialog with Open Folder (F-35) | `MainWindow._on_transcription_finished()` §8.7 |
 | Click "Cancel" | `MainWindow._on_cancel_clicked()` §8.7 |
 | Set `cancel_event` | `MainWindow._on_cancel_clicked()` §8.7 |
 | Emit `cancelled` | `MainWindow._process_recording()` §8.5 → `Signals.cancelled` §2.1 |
@@ -898,4 +898,4 @@ This section provides full, function-level traceability from every element of `A
 | `get_pipeline()(waveform)` | `PyannoteManager.get_pipeline()` §4.2 |
 | Write transcript file(s) | `TranscriptionEngine._save_transcript()` / `_save_diarized_transcript()` §6.2 |
 | Emit `finished` | `MainWindow._transcribe_wav_file()` §8.5 → `Signals.finished` §2.1 |
-| Handle `finished` — show dialog | `MainWindow._on_finished()` §8.7 |
+| Handle `finished` — show dialog with Open Folder (F-35) | `MainWindow._on_transcription_finished()` §8.7 |
