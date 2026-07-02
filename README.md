@@ -9,8 +9,11 @@ Desktop app per la trascrizione automatica di riunioni con identificazione degli
 - Identificazione degli speaker (diarizzazione) con [pyannote.audio](https://github.com/pyannote/pyannote-audio)
 - Supporto GPU (CUDA) con fallback automatico a CPU
 - Selezione dispositivo audio (microfono e speaker)
-- Mute microfono durante la registrazione
+- Mute microfono durante la registrazione senza interromperla
 - Trascrizione di file WAV esistenti
+- Apertura rapida della cartella di output al termine dell'elaborazione
+- Preferenze UI ripristinate automaticamente all'avvio
+- Una sola istanza attiva alla volta
 - Log giornalieri in `logs/`
 
 ## Requisiti di sistema
@@ -33,6 +36,33 @@ Desktop app per la trascrizione automatica di riunioni con identificazione degli
 ## Avvio
 
 Doppio click su **`run.bat`**
+
+---
+
+## Utilizzo
+
+### Registrazione e trascrizione
+
+1. Seleziona le sorgenti audio da registrare (**Microfono**, **Speaker**, o entrambe)
+2. Seleziona i dispositivi specifici dagli elenchi a discesa, se necessario
+3. Scegli la lingua oppure lascia **Auto** per il rilevamento automatico
+4. Attiva **Trascrizione** e/o **Diarizzazione** secondo necessità  
+   > La diarizzazione richiede che la trascrizione sia abilitata
+5. Clicca **Avvia Registrazione**
+6. Durante la registrazione puoi:
+   - Monitorare i livelli audio in tempo reale
+   - Silenziare il microfono con il pulsante **Mute Mic** senza interrompere la registrazione
+7. Clicca **Ferma Registrazione**
+8. Attendi il completamento dell'elaborazione (la barra di avanzamento indica lo stato)
+9. Al termine appare un popup con il percorso del file: clicca **Apri Cartella** per aprire direttamente la cartella di output, oppure **Ok** per chiudere
+
+### Trascrizione di un file esistente
+
+Usa il pulsante dedicato per selezionare un file WAV già registrato. Il risultato viene salvato in una nuova sottocartella di `recordings/`.
+
+### Annullamento
+
+Durante la trascrizione è possibile cliccare **Annulla**: la trascrizione parziale dei segmenti già elaborati viene comunque salvata.
 
 ## Configurazione
 
@@ -97,7 +127,11 @@ run.bat                    # Avvio applicazione
 requirements-cpu.txt       # Dipendenze CPU
 requirements-gpu.txt       # Dipendenze GPU (CUDA)
 config.json                # Configurazione (creato al primo avvio)
-logs/                      # Log giornalieri
-recordings/                # Trascrizioni e audio
-models/                    # Modelli scaricati
+logs/                      # Log giornalieri (rotazione giornaliera)
+recordings/                # Trascrizioni e audio per sessione
+models/                    # Modelli AI scaricati
+docs/                      # Documentazione tecnica
+    REQUIREMENTS.md        #   Specifiche dei requisiti (SRS)
+    ARCHITECTURE.md        #   Architettura del software
+    COMPONENT_DESIGN.md    #   Design di dettaglio dei componenti
 ```
