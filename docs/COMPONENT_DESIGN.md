@@ -7,6 +7,8 @@
 
 ## 1. Module-Level Entities
 
+> **Architecture mapping (ARCH)**: §4.3 (single-instance socket lock); §4.4 (`_load_config`, `_load_settings`); §4.5 (CUDA DLL path setup); §4.7 (`_make_app_icon`); §2.2 MainWindow UI (`_apply_style`, `_get_audio_devices`, `_combo_set_data`); cross-component utility (`format_timestamp`).
+
 ### 1.1 Constants
 
 | Name | Value | Description |
@@ -120,6 +122,8 @@ Applies a Windows 11-inspired Fusion style and a QSS stylesheet to the applicati
 
 ## 2. Class: `Signals`
 
+> **Architecture mapping (ARCH)**: §2.2 Signal Bus component; §4.1 Thread Safety; present in all interaction flows §3.1-§3.5. The class diagram in ARCH §2.1 shows 6 representative signals; the full set of 12 is declared here.
+
 **Inherits**: `QObject`  
 **Purpose**: typed signal container enabling safe cross-thread communication between background threads and the main-thread UI. All signals are class-level attributes declared once; instances are shared via reference.
 
@@ -143,6 +147,8 @@ Applies a Windows 11-inspired Fusion style and a QSS stylesheet to the applicati
 ---
 
 ## 3. Class: `WhisperManager`
+
+> **Architecture mapping (ARCH)**: §2.2 `ASREngine` component (architecture uses the logical name `ASREngine`); §3.1 model-load step; §3.3 and §3.5 transcription step; §4.5 lazy-import of `faster_whisper`.
 
 **Purpose**: manages the full lifecycle of the faster-whisper ASR model — presence check, download, loading (with GPU→CPU fallback), and transcription.
 
@@ -200,6 +206,8 @@ Transcribes a WAV file. Iterates the segment generator and stops early if `cance
 ---
 
 ## 4. Class: `PyannoteManager`
+
+> **Architecture mapping (ARCH)**: §2.2 `DiarizationEngine` component (architecture uses the logical name `DiarizationEngine`); §3.1 pipeline-load step; §3.3 speaker-segmentation step; §3.4 token management flow; §3.5; §4.5 lazy-imports of `pyannote.audio` and `torch`.
 
 **Purpose**: manages the pyannote speaker-diarization pipeline lifecycle, including HuggingFace token persistence and model download.
 
@@ -282,6 +290,8 @@ Internal: loads the pipeline from the local model cache and moves it to GPU if a
 ---
 
 ## 5. Class: `AudioRecorder`
+
+> **Architecture mapping (ARCH)**: §2.2 `AudioRecorder` component; §3.2 Recording Session (full flow); §3.3 `save_wav` entry point; §4.5 lazy-import of `soundcard`; constrained by C-01 (Windows-only WASAPI loopback).
 
 **Purpose**: captures microphone and/or speaker loopback audio on two independent daemon threads, manages mute state, mixes the streams, and exports to WAV.
 
@@ -387,6 +397,8 @@ Concatenates and pads speaker and mic arrays to the same length, sums them, peak
 
 ## 6. Class: `TranscriptionEngine`
 
+> **Architecture mapping (ARCH)**: §2.2 `TranscriptionEngine` (Orchestration Layer); §2.3 dependency-injection receiver from `MainWindow`; orchestrates §3.3 Transcription & Diarization Pipeline and §3.5 WAV File Transcription.
+
 **Purpose**: orchestrates the full processing pipeline — ASR transcription, diarization, speaker-to-word assignment, and file output.
 
 ### 6.1 Constructor
@@ -483,6 +495,8 @@ Assigns a speaker to every word across all transcription segments, applies hyste
 
 ## 7. Class: `PyannoteSetupDialog`
 
+> **Architecture mapping (ARCH)**: §2.2 `PyannoteSetupDialog` (UI Layer); §3.1 token-missing branch; §3.4 full Token Management flow.
+
 **Inherits**: `QDialog`  
 **Purpose**: one-shot modal dialog that guides the user through HuggingFace account creation, token generation, and model download.
 
@@ -512,6 +526,8 @@ Validates that the token field is non-empty, saves the token via `manager.save_t
 ---
 
 ## 8. Class: `MainWindow`
+
+> **Architecture mapping (ARCH)**: §2.2 `MainWindow` (UI Layer); §2.3 composition owner of all domain components; drives all interaction flows §3.1-§3.5; implements §4.1 (thread safety via `Signals`), §4.3 (single-instance guard), §4.4 (settings I/O), §4.6 (UI state management), §4.7 (icon).
 
 **Inherits**: `QWidget`  
 **Purpose**: application main window; owns all domain components; coordinates UI state with background operations via the `Signals` bus.
@@ -645,3 +661,241 @@ Applies a settings dict to all relevant widgets using `_combo_set_data` for comb
 #### `closeEvent(event: QCloseEvent) -> None`
 
 Calls `_save_settings`, stops any active recording, then accepts the event.
+
+---
+
+## 9. Architecture Traceability
+
+This section provides full, function-level traceability from every element of `ARCHITECTURE.md` (abbreviated **ARCH**) to the concrete methods in this document. Three perspectives are covered: component responsibilities (§9.1), cross-cutting concerns (§9.2), and each step of every dynamic flow (§9.3).
+
+---
+
+### 9.1 Component Responsibilities → Implementing Methods
+
+#### Module-Level Entities (§1)
+
+| Purpose / ARCH § | Function |
+|---|---|
+| Single-instance socket lock (§4.3) | Module-level `_socket.bind()` §1.3 |
+| CUDA DLL path setup (§4.5, NF-03) | Module-level `os.add_dll_directory` §1.3 |
+| Configuration loading (§4.4) | `_load_config()` §1.3 |
+| Settings loading (§4.4) | `_load_settings()` §1.3 |
+| Combo box value restore (§4.4) | `_combo_set_data()` §1.3 |
+| Audio device enumeration for UI (§2.2, §3.2) | `_get_audio_devices()` §1.3 |
+| Timestamp formatting (output files in §3.3) | `format_timestamp()` §1.3 |
+| Application icon (§4.7) | `_make_app_icon()` §1.3 |
+| Visual styling - Fusion + QSS (§2.2 MainWindow UI) | `_apply_style()` §1.3 |
+
+#### `ASREngine` → `WhisperManager` (§3)
+
+> **Naming note**: architecture uses the logical name `ASREngine`; the implementation class is `WhisperManager`.
+
+| Architectural Responsibility (ARCH §2.2) | Implementing Method |
+|---|---|
+| Model presence check | `is_installed()` §3.2 |
+| Model loading with status callback | `load()` §3.2 |
+| CUDA → CPU fallback | `load()` §3.2 |
+| Speech-to-text transcription | `transcribe()` §3.2 |
+
+#### `DiarizationEngine` → `PyannoteManager` (§4)
+
+> **Naming note**: architecture uses the logical name `DiarizationEngine`; the implementation class is `PyannoteManager`.
+
+| Architectural Responsibility (ARCH §2.2) | Implementing Method |
+|---|---|
+| Model presence check | `is_installed()` §4.2 |
+| Pipeline loading (lazy) | `get_pipeline()`, `_initialize_pipeline()` §4.2 |
+| GPU placement of pipeline | `_initialize_pipeline()` §4.2 |
+| Model download from HuggingFace | `download_models()` §4.2 |
+| Token storage (write) | `save_token()` §4.2 |
+| Token retrieval | `load_token()` §4.2 |
+| Token deletion | `delete_token()` §4.2 |
+| Token presence check | `token_exists()` §4.2 |
+| Token migration (plain file → keyring) | `__init__` §4.1 |
+
+#### `AudioRecorder` (§5)
+
+| Architectural Responsibility (ARCH §2.2) | Implementing Method |
+|---|---|
+| Microphone capture (parallel thread) | `_record_microphone()` §5.2 |
+| Speaker loopback capture (parallel thread) | `_record_speaker()` §5.2 |
+| Microphone muting | `mute_mic()` §5.2 |
+| Real-time audio level reading | `get_levels()` §5.2 |
+| Stream mixing | `_mix()` §5.2 |
+| Peak normalisation | `_mix()` §5.2 |
+| WAV file export | `save_wav()` §5.2 |
+| Device error notification via callback | `_record_speaker()`, `_record_microphone()` §5.2 |
+
+#### `TranscriptionEngine` (§6)
+
+| Architectural Responsibility (ARCH §2.2) | Implementing Method |
+|---|---|
+| Coordinate ASR + diarization | `process()` §6.2 |
+| Speaker-to-word assignment | `_assign_speakers_to_words()` §6.2 |
+| Best-speaker selection per word | `_find_best_speaker()` §6.2 |
+| Plain transcript file generation | `_save_transcript()` §6.2 |
+| Diarized transcript file generation | `_save_diarized_transcript()` §6.2 |
+| Unique output file naming | `_unique_path()` §6.2 |
+| Run pyannote pipeline on waveform | `_run_diarization()` §6.2 |
+
+#### `PyannoteSetupDialog` (§7)
+
+| Architectural Responsibility (ARCH §2.2) | Implementing Method |
+|---|---|
+| Guided token entry UI | `__init__` §7.1 (`token_edit` widget + URL buttons) |
+| Token validation and download trigger | `_on_download_clicked()` §7.3 |
+
+#### `MainWindow` (§8)
+
+| Architectural Responsibility / ARCH § | Implementing Method |
+|---|---|
+| User interaction layout (§2.2) | `_setup_ui()` §8.3 |
+| Audio device enumeration for UI (§2.2, §3.2) | `_get_audio_devices()` §1.3 |
+| Signal → slot wiring (§4.1) | `_connect_signals()` §8.3 |
+| Whisper model loading orchestration (§3.1) | `_load_models()` §8.4 |
+| Pyannote setup and load orchestration (§3.1) | `_initialize_pyannote()`, `_load_pyannote_pipeline()` §8.4 |
+| Recording start (§3.2) | `_start_recording()` §8.5 |
+| Recording stop + processing thread spawn (§3.2→§3.3) | `_stop_recording()` §8.5 |
+| Post-recording processing (§3.3) | `_process_recording()` §8.5 |
+| WAV file transcription (§3.5) | `_transcribe_wav_file()` §8.5 |
+| Manual Whisper re-installation (§4.6, F-31) | `_on_install_whisper_clicked()`, `_run_whisper_install()` §8.7 |
+| Manual pyannote re-installation (§4.6, F-31) | `_on_install_pyannote_clicked()`, `_run_pyannote_install()` §8.7 |
+| Control state enforcement (§4.6) | `_update_controls()` §8.6 |
+| Source toggle handling (§4.6) | `_on_source_toggled()` §8.6 |
+| Level meter update 80 ms (§3.2, NF-02) | `_update_levels()` §8.6 |
+| Duration timer update 1 s (§3.2) | `_update_duration()` §8.6 |
+| UI preferences save (§4.4) | `_save_settings()` §8.8 |
+| UI preferences restore (§4.4) | `_apply_settings()` §8.8 |
+| Window close handling | `closeEvent()` §8.8 |
+
+#### `Signals` (§2)
+
+| Purpose | Signal | ARCH § |
+|---|---|---|
+| Status label update | `status_changed` §2.1 | §2.2, §3.1-§3.5 |
+| Processing completed | `finished` §2.1 | §2.2, §3.3, §3.5 |
+| Processing error | `error` §2.1 | §2.2, §3.3 |
+| Transcription cancelled | `cancelled` §2.1 | §2.2, §3.3 |
+| Whisper model ready | `whisper_ready` §2.1 | §2.2, §3.1 |
+| Pyannote pipeline ready | `pyannote_ready` §2.1 | §2.2, §3.1 |
+| Whisper download prompt | `whisper_setup_requested` §2.1 | §3.1 |
+| Pyannote setup prompt | `pyannote_setup_requested` §2.1 | §3.1 |
+| Pyannote setup result handshake | `pyannote_setup_finished` §2.1 | §3.1 (internal thread handshake; not shown in sequence diagram) |
+| Background-thread modal dialog | `messagebox_requested` §2.1 | §4.1 (extends thread-safety pattern to modal dialogs) |
+| Startup loading complete | `initial_load_complete` §2.1 | §3.1 |
+| Progress bar during model loading | `progress_visible` §2.1 | §3.1 (progress bar visibility; not shown in sequence diagram) |
+
+---
+
+### 9.2 Cross-Cutting Concerns → Implementing Methods
+
+| Concern (ARCH §) | Implementing Method(s) |
+|---|---|
+| §4.1 Thread Safety | `Signals` §2.1 (all signal declarations); `MainWindow._connect_signals()` §8.3; all background threads access UI only through signals |
+| §4.2 Logging — error capture | Module-level `log = logging.getLogger(__name__)` §1.3; `sys.excepthook` §1.3; `log.error/warning/info` calls in every class |
+| §4.2 Logging — no tokens in logs | `PyannoteManager.save_token()`, `load_token()`, `delete_token()` §4.2 — token strings never passed to `log` calls |
+| §4.3 Single Instance | Module-level socket lock §1.3 — executed before `MainWindow.__init__` |
+| §4.4 Settings Persistence | `MainWindow._save_settings()` §8.8; `MainWindow._apply_settings()` §8.8; `_combo_set_data()` §1.3 |
+| §4.5 Lazy imports — `faster_whisper` | `WhisperManager.load()` §3.2 |
+| §4.5 Lazy imports — `pyannote.audio` | `PyannoteManager._initialize_pipeline()` §4.2; `PyannoteManager.download_models()` §4.2 |
+| §4.5 Lazy imports — `torch` | `PyannoteManager._initialize_pipeline()` §4.2; `TranscriptionEngine._run_diarization()` §6.2 |
+| §4.5 Lazy imports — `soundcard` | `AudioRecorder._record_speaker()` §5.2; `AudioRecorder._record_microphone()` §5.2 |
+| §4.6 UI State Management | `MainWindow._update_controls()` §8.6; `MainWindow._on_source_toggled()` §8.6; `MainWindow._sources_enabled()` §8.6 |
+| §4.7 Application Icon | `_make_app_icon()` §1.3 |
+
+---
+
+### 9.3 Dynamic Flows → Implementing Methods
+
+#### ARCH §3.1 — Application Startup
+
+| Sequence step | Implementing Method |
+|---|---|
+| Check single instance (port lock) | Module-level socket bind §1.3 |
+| Show GUI immediately | `MainWindow.__init__` §8.2 → `w.show()` |
+| Start background model-loading thread | `MainWindow.__init__` §8.2 |
+| `is_installed()?` — Whisper | `WhisperManager.is_installed()` §3.2 |
+| Emit `whisper_setup_requested` | `_load_models()` §8.4 → `Signals.whisper_setup_requested` §2.1 |
+| Show "Download model?" dialog | `MainWindow._on_whisper_setup_requested()` §8.7 |
+| `load()` — CUDA → CPU fallback | `WhisperManager.load()` §3.2 |
+| Emit `whisper_ready` | `_load_models()` §8.4 → `Signals.whisper_ready` §2.1 |
+| Handle `whisper_ready` | `MainWindow._on_whisper_ready()` §8.7 |
+| `is_installed()?` — pyannote | `PyannoteManager.is_installed()` §4.2 |
+| Emit `pyannote_setup_requested` | `_initialize_pyannote()` §8.4 → `Signals.pyannote_setup_requested` §2.1 |
+| Show token setup dialog | `MainWindow._on_pyannote_setup_requested()` §8.7 → `PyannoteSetupDialog` §7 |
+| `download_models()` | `PyannoteManager.download_models()` §4.2 |
+| `load_pipeline()` | `PyannoteManager.get_pipeline()` / `_initialize_pipeline()` §4.2 |
+| Emit `pyannote_ready` | `_load_pyannote_pipeline()` §8.4 → `Signals.pyannote_ready` §2.1 |
+| Handle `pyannote_ready` | `MainWindow._on_pyannote_ready()` §8.7 |
+| Emit `initial_load_complete` | `_load_models()` §8.4 → `Signals.initial_load_complete` §2.1 |
+| Enable Start button, update status | `MainWindow._on_initial_load_complete()` §8.7 |
+
+#### ARCH §3.2 — Recording Session
+
+| Sequence step | Implementing Method |
+|---|---|
+| Configure sources and devices | `MainWindow._on_source_toggled()` §8.6; combo boxes in `_setup_ui()` §8.3 |
+| Click "Start Recording" | `MainWindow._start_recording()` §8.5 |
+| `start(mic, speaker, device IDs)` | `AudioRecorder.start()` §5.2 |
+| Start level meter timer | `MainWindow._start_recording()` §8.5 — starts 80 ms QTimer |
+| `get_levels()` per tick | `AudioRecorder.get_levels()` §5.2 |
+| Update level bars | `MainWindow._update_levels()` §8.6 |
+| Click "Mute Mic" | `MainWindow._on_mute_mic_clicked()` §8.7 |
+| `mute_mic(True)` | `AudioRecorder.mute_mic()` §5.2 |
+| Substitute silence for mic chunks | `AudioRecorder._record_microphone()` §5.2 |
+| Click "Stop Recording" | `MainWindow._stop_recording()` §8.5 |
+| Stop level meter timer | `MainWindow._stop_recording()` §8.5 |
+| `stop()` — join capture threads | `AudioRecorder.stop()` §5.2 |
+| Show Cancel, disable Start | `MainWindow._update_controls()` §8.6 |
+| Spawn `_process_recording` thread | `MainWindow._stop_recording()` §8.5 |
+
+#### ARCH §3.3 — Transcription & Diarization
+
+| Sequence step | Implementing Method |
+|---|---|
+| Create timestamped output folder | `MainWindow._process_recording()` §8.5 |
+| `save_wav()` — mix, normalise, write | `AudioRecorder.save_wav()` §5.2 |
+| Internal audio mixing | `AudioRecorder._mix()` §5.2 |
+| `process(wav, language, diarization, cancel_event)` | `TranscriptionEngine.process()` §6.2 |
+| `transcribe(wav, language)` | `WhisperManager.transcribe()` §3.2 |
+| `cancel_event` checked per segment | `WhisperManager.transcribe()` §3.2 |
+| `get_pipeline()(waveform)` | `PyannoteManager.get_pipeline()` §4.2 |
+| Assign speakers to words | `TranscriptionEngine._assign_speakers_to_words()` §6.2 |
+| Best-speaker selection per word | `TranscriptionEngine._find_best_speaker()` §6.2 |
+| Write `transcript.txt` | `TranscriptionEngine._save_transcript()` §6.2 |
+| Write `transcript_diarized.txt` | `TranscriptionEngine._save_diarized_transcript()` §6.2 |
+| Emit `finished` | `MainWindow._process_recording()` §8.5 → `Signals.finished` §2.1 |
+| Handle `finished` — show dialog | `MainWindow._on_finished()` §8.7 |
+| Click "Cancel" | `MainWindow._on_cancel_clicked()` §8.7 |
+| Set `cancel_event` | `MainWindow._on_cancel_clicked()` §8.7 |
+| Emit `cancelled` | `MainWindow._process_recording()` §8.5 → `Signals.cancelled` §2.1 |
+| Handle `cancelled` | `MainWindow._on_cancelled()` §8.7 |
+| Emit `error` | `MainWindow._process_recording()` §8.5 → `Signals.error` §2.1 |
+| Handle `error` — show dialog | `MainWindow._on_transcription_error()` §8.7 |
+| Restore controls after any outcome | `MainWindow._update_controls()` §8.6 |
+
+#### ARCH §3.4 — Token Management
+
+| Sequence step | Implementing Method |
+|---|---|
+| `get_password(…)` — read token | `PyannoteManager.load_token()` §4.2 |
+| `set_password(…)` — persist token | `PyannoteManager.save_token()` §4.2 |
+| `delete_password()` — remove token | `PyannoteManager.delete_token()` §4.2 |
+| `download_models(token)` | `PyannoteManager.download_models()` §4.2 |
+| Detect 401/403, delete bad token | `PyannoteManager.download_models()` §4.2 |
+| Re-prompt user | `MainWindow._on_pyannote_setup_requested()` §8.7 → `PyannoteSetupDialog` §7 |
+| Token migration (file → keyring) | `PyannoteManager.__init__` §4.1 |
+
+#### ARCH §3.5 — WAV File Transcription
+
+| Sequence step | Implementing Method |
+|---|---|
+| Click "Transcribe WAV file…" | `MainWindow` — dedicated handler §8.7 |
+| Open-file dialog | `MainWindow._transcribe_wav_file()` §8.5 — `QFileDialog` call |
+| Spawn processing thread | `MainWindow._transcribe_wav_file()` §8.5 |
+| `process(wav, language, diarization)` | `TranscriptionEngine.process()` §6.2 |
+| `transcribe(wav, language)` | `WhisperManager.transcribe()` §3.2 |
+| `get_pipeline()(waveform)` | `PyannoteManager.get_pipeline()` §4.2 |
+| Write transcript file(s) | `TranscriptionEngine._save_transcript()` / `_save_diarized_transcript()` §6.2 |
+| Emit `finished` | `MainWindow._transcribe_wav_file()` §8.5 → `Signals.finished` §2.1 |
+| Handle `finished` — show dialog | `MainWindow._on_finished()` §8.7 |

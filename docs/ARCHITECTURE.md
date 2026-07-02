@@ -83,21 +83,25 @@ classDiagram
 
 ### 2.2 Component Responsibilities
 
-| Component | Layer | Responsibility |
-|---|---|---|
-| **MainWindow** | UI | User interaction, control state, background thread orchestration, settings I/O |
-| **Signals** | Signal Bus | Typed Qt signals for safe cross-thread UI updates; decouples background threads from UI widgets |
-| **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing, normalisation, WAV export |
-| **ASREngine** | AI | Whisper model lifecycle (download, load, transcribe); GPU→CPU fallback |
-| **DiarizationEngine** | AI | pyannote pipeline lifecycle; HuggingFace token management; speaker segmentation |
-| **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; speaker-to-word assignment; transcript file generation |
-| **PyannoteSetupDialog** | UI | One-shot dialog for HuggingFace token entry and model download |
+The **Component Design §** column references the corresponding section in `COMPONENT_DESIGN.md` (abbreviated **CD**).
+
+| Component | Layer | Responsibility | Component Design § |
+|---|---|---|---|
+| **MainWindow** | UI | User interaction, control state, background thread orchestration, settings I/O | CD §8 |
+| **Signals** | Signal Bus | Typed Qt signals for safe cross-thread UI updates; decouples background threads from UI widgets | CD §2 |
+| **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing, normalisation, WAV export | CD §5 |
+| **ASREngine** | AI | Whisper model lifecycle (download, load, transcribe); GPU→CPU fallback | CD §3 (`WhisperManager`) |
+| **DiarizationEngine** | AI | pyannote pipeline lifecycle; HuggingFace token management; speaker segmentation | CD §4 (`PyannoteManager`) |
+| **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; speaker-to-word assignment; transcript file generation | CD §6 |
+| **PyannoteSetupDialog** | UI | One-shot dialog for HuggingFace token entry and model download | CD §7 |
+
+> **Note on naming**: `ASREngine` and `DiarizationEngine` are the logical names used at architecture level. Their concrete implementations are `WhisperManager` and `PyannoteManager` respectively.
 
 ### 2.3 Key Relationships
 
-- **Composition** (`MainWindow` → core components): `MainWindow` owns and controls the lifecycle of all domain components.
-- **Dependency** (`TranscriptionEngine` → AI engines): `TranscriptionEngine` receives both AI engine instances at construction (dependency injection) and uses them to produce transcripts.
-- **Signal Bus** (`Signals`): background threads emit signals; Qt dispatches them to the main thread where UI updates occur. No direct references from threads to UI widgets.
+- **Composition** (`MainWindow` → core components): `MainWindow` owns and controls the lifecycle of all domain components. Concrete instance attributes are in CD §8.1; the initialisation sequence is in CD §8.2.
+- **Dependency** (`TranscriptionEngine` → AI engines): `TranscriptionEngine` receives both AI engine instances at construction (dependency injection) and uses them to produce transcripts. See CD §6.1 constructor.
+- **Signal Bus** (`Signals`): background threads emit signals; Qt dispatches them to the main thread where UI updates occur. No direct references from threads to UI widgets. Full signal inventory is in CD §2.1; slot wiring is in CD §8.3 `_connect_signals()`.
 
 ---
 
@@ -306,7 +310,7 @@ sequenceDiagram
 ## 4. Cross-Cutting Concerns
 
 ### 4.1 Thread Safety
-All background threads communicate with the UI exclusively via Qt signals. No background thread holds a direct reference to a UI widget. The `Signals` object is created on the main thread and passed to background operations.
+All background threads communicate with the UI exclusively via Qt signals. No background thread holds a direct reference to a UI widget. The `Signals` object is created on the main thread and passed to background operations. The `messagebox_requested` signal (CD §2.1) extends this pattern to allow background threads to trigger modal dialogs without touching Qt widgets directly. See CD §2.1 for the full signal inventory and CD §8.3 for slot wiring.
 
 ### 4.2 Logging
 All components write to a shared daily log file via the standard Python `logging` module. A global `sys.excepthook` ensures unhandled exceptions are logged before the process exits (NF-05, NF-06). Sensitive values (tokens, credentials) are never passed to log calls — they are referenced only inside `DiarizationEngine.save_token` / `load_token` which write nothing to the log (NF-10).
@@ -320,12 +324,12 @@ UI state is serialised to `settings.json` on window close and reloaded at startu
 ### 4.5 Startup Performance
 To satisfy NF-01 (GUI visible within 2 seconds), all heavyweight libraries are imported lazily inside the first method that needs them rather than at module level:
 
-| Library | Imported inside |
-|---|---|
-| `faster_whisper.WhisperModel` | `ASREngine.load()` |
-| `pyannote.audio.Pipeline` | `DiarizationEngine._initialize_pipeline()`, `download_models()` |
-| `torch` | `DiarizationEngine._initialize_pipeline()`, `TranscriptionEngine._run_diarization()` |
-| `soundcard` | `AudioRecorder._record_speaker()`, `_record_microphone()` |
+| Library | Imported inside | Component Design § |
+|---|---|---|
+| `faster_whisper.WhisperModel` | `WhisperManager.load()` | CD §3.2 |
+| `pyannote.audio.Pipeline` | `PyannoteManager._initialize_pipeline()`, `download_models()` | CD §4.2 |
+| `torch` | `PyannoteManager._initialize_pipeline()`, `TranscriptionEngine._run_diarization()` | CD §4.2, CD §6.2 |
+| `soundcard` | `AudioRecorder._record_speaker()`, `_record_microphone()` | CD §5.2 |
 
 The GUI window is rendered and shown before any model loading begins. The background model-loading thread is started after the window is visible.
 
