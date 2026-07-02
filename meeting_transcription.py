@@ -818,7 +818,8 @@ class MainWindow(QWidget):
         self.setWindowTitle(f"Meeting Transcriber v{__version__}")
         self.setFixedSize(400, 580)
         self._setup_ui()
-        self._apply_settings(_load_settings())
+        self._pending_settings = _load_settings()
+        self._apply_settings(self._pending_settings)
 
         # ── 6. Signal connections ─────────────────────────────────────────────
         self._connect_signals()
@@ -1056,6 +1057,10 @@ class MainWindow(QWidget):
     def _on_initial_load_complete(self):
         self.progress_bar.setVisible(False)
         self.start_button.setEnabled(self._sources_enabled())
+        if self.whisper_ready:
+            self.transcribe_checkbox.setChecked(self._pending_settings["transcribe"])
+        if self.whisper_ready and self.pyannote_ready:
+            self.diarization_checkbox.setChecked(self._pending_settings["diarization"])
 
     def _sources_enabled(self):
         return self.mic_checkbox.isChecked() or self.speaker_checkbox.isChecked()
