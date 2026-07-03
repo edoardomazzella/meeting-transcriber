@@ -73,16 +73,26 @@ Al primo avvio viene creato il file `config.json`:
     "cuda_bin_dir": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin",
     "model_size": "medium",
     "beam_size": 5,
-    "vad": true
+    "vad": true,
+    "num_workers": 4,
+    "cpu_threads": 4,
+    "compute_type_gpu": "int8_float16",
+    "chunk_length": 30,
+    "pyannote_batch_size": 32
 }
 ```
 
-| Parametro | Descrizione |
-|---|---|
-| `cuda_bin_dir` | Percorso alla cartella `bin` di CUDA. Lascia vuoto (`""`) se CUDA è già nel PATH |
-| `model_size` | Dimensione modello Whisper: `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `beam_size` | Qualità trascrizione (valori più alti = più accurato ma più lento) |
-| `vad` | Voice Activity Detection: filtra i silenzi prima della trascrizione |
+| Parametro | Default | Descrizione |
+|---|---|---|
+| `cuda_bin_dir` | `"C:\\...\\CUDA\\v12.9\\bin"` | Percorso alla cartella `bin` di CUDA. Lascia vuoto (`""`) se CUDA è già nel PATH |
+| `model_size` | `"medium"` | Dimensione modello Whisper: `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `beam_size` | `5` | Qualità trascrizione (1 = greedy/velocissimo, 5 = accurato). Ha il maggior impatto sulla velocità |
+| `vad` | `true` | Voice Activity Detection: filtra i segmenti non-parlato prima della trascrizione. Disabilita per trascrivere musica/canzoni |
+| `num_workers` | `4` | Worker paralleli per il preprocessing audio. Aumentare riduce il tempo di attesa della GPU |
+| `cpu_threads` | `4` | Thread CPU per le operazioni CTranslate2 |
+| `compute_type_gpu` | `"int8_float16"` | Precisione numerica su GPU. Opzioni: `float16`, `int8_float16` (più veloce), `int8` |
+| `chunk_length` | `30` | Durata in secondi di ogni chunk audio elaborato. Ridurre (es. `15`) per audio con molti speaker brevi |
+| `pyannote_batch_size` | `32` | Segmenti diarizzati in parallelo. Aumentare (es. `64`) se la VRAM lo consente |
 
 ## Diarizzazione (identificazione speaker)
 

@@ -4,5 +4,8 @@
     "beam_size": 5,
     "vad": true,
     "num_workers": 4,
-    "cpu_threads": 4
+    "cpu_threads": 4,
+    "compute_type_gpu": "int8_float16",
+    "chunk_length": 30,
+    "pyannote_batch_size": 32
 }

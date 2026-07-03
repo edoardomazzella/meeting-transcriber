@@ -32,12 +32,15 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 _CONFIG_FILE = SCRIPT_DIR / "config.json"
 _CONFIG_DEFAULTS = {
-    "cuda_bin_dir": r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
-    "model_size":   "medium",
-    "beam_size":    5,
-    "vad":          True,
-    "num_workers":  4,
-    "cpu_threads":  4,
+    "cuda_bin_dir":        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
+    "model_size":          "medium",
+    "beam_size":           5,
+    "vad":                 True,
+    "num_workers":         4,
+    "cpu_threads":         4,
+    "compute_type_gpu":    "int8_float16",
+    "chunk_length":        30,
+    "pyannote_batch_size": 32,
 }
 
 def _load_config():
@@ -53,12 +56,15 @@ def _load_config():
     return dict(_CONFIG_DEFAULTS)
 
 _cfg        = _load_config()
-CUDA_BIN_DIR = _cfg["cuda_bin_dir"]
-MODEL_SIZE   = _cfg["model_size"]
-BEAM_SIZE    = int(_cfg["beam_size"])
-VAD          = bool(_cfg["vad"])
-NUM_WORKERS  = int(_cfg["num_workers"])
-CPU_THREADS  = int(_cfg["cpu_threads"])
+CUDA_BIN_DIR      = _cfg["cuda_bin_dir"]
+MODEL_SIZE        = _cfg["model_size"]
+BEAM_SIZE         = int(_cfg["beam_size"])
+VAD               = bool(_cfg["vad"])
+NUM_WORKERS       = int(_cfg["num_workers"])
+CPU_THREADS       = int(_cfg["cpu_threads"])
+COMPUTE_TYPE_GPU  = _cfg["compute_type_gpu"]
+CHUNK_LENGTH      = int(_cfg["chunk_length"])
+PYANNOTE_BATCH    = int(_cfg["pyannote_batch_size"])
 
 _SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 _SETTINGS_DEFAULTS = {
@@ -227,7 +233,7 @@ class WhisperManager:
             from faster_whisper import WhisperModel
             logging.getLogger("torch.utils.flop_counter").setLevel(logging.ERROR)
             self.model = WhisperModel(
-                MODEL_SIZE, device="cuda", compute_type="float16",
+                MODEL_SIZE, device="cuda", compute_type=COMPUTE_TYPE_GPU,
                 download_root=str(self.model_dir),
                 num_workers=NUM_WORKERS, cpu_threads=CPU_THREADS,
             )
@@ -253,7 +259,7 @@ class WhisperManager:
             on_status("Transcribing...")
         log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
         args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True,
-                    condition_on_previous_text=False, temperature=0)
+                    condition_on_previous_text=False, temperature=0, chunk_length=CHUNK_LENGTH)
         if language:
             args["language"] = language
         segments_gen, _ = self.model.transcribe(**args)
@@ -583,7 +589,9 @@ class TranscriptionEngine:
         waveform = torch.from_numpy(waveform)
         if on_status:
             on_status("Running speaker diarization...")
-        result = self.pyannote.get_pipeline()({"waveform": waveform, "sample_rate": sr})
+        result = self.pyannote.get_pipeline()(
+            {"waveform": waveform, "sample_rate": sr}, batch_size=PYANNOTE_BATCH
+        )
         speaker_segments = result.exclusive_speaker_diarization
         del waveform
         speakers = {label for _, _, label in speaker_segments.itertracks(yield_label=True)}
