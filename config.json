@@ -2,5 +2,7 @@
     "cuda_bin_dir": "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\bin",
     "model_size": "medium",
     "beam_size": 5,
-    "vad": false
+    "vad": true,
+    "num_workers": 4,
+    "cpu_threads": 4
 }

@@ -36,6 +36,8 @@ _CONFIG_DEFAULTS = {
     "model_size":   "medium",
     "beam_size":    5,
     "vad":          True,
+    "num_workers":  4,
+    "cpu_threads":  4,
 }
 
 def _load_config():
@@ -55,6 +57,8 @@ CUDA_BIN_DIR = _cfg["cuda_bin_dir"]
 MODEL_SIZE   = _cfg["model_size"]
 BEAM_SIZE    = int(_cfg["beam_size"])
 VAD          = bool(_cfg["vad"])
+NUM_WORKERS  = int(_cfg["num_workers"])
+CPU_THREADS  = int(_cfg["cpu_threads"])
 
 _SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 _SETTINGS_DEFAULTS = {
@@ -225,6 +229,7 @@ class WhisperManager:
             self.model = WhisperModel(
                 MODEL_SIZE, device="cuda", compute_type="float16",
                 download_root=str(self.model_dir),
+                num_workers=NUM_WORKERS, cpu_threads=CPU_THREADS,
             )
             return
         except Exception as e:
@@ -236,6 +241,7 @@ class WhisperManager:
             self.model = WhisperModel(
                 MODEL_SIZE, device="cpu", compute_type="int8",
                 download_root=str(self.model_dir),
+                num_workers=NUM_WORKERS, cpu_threads=CPU_THREADS,
             )
         except Exception as e:
             log.error("Whisper CPU load failed: %s", e, exc_info=True)
@@ -246,7 +252,8 @@ class WhisperManager:
         if on_status:
             on_status("Transcribing...")
         log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
-        args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True)
+        args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True,
+                    condition_on_previous_text=False, temperature=0)
         if language:
             args["language"] = language
         segments_gen, _ = self.model.transcribe(**args)
