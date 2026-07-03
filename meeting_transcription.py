@@ -811,6 +811,7 @@ class MainWindow(QWidget):
         self.whisper_ready = False
         self.pyannote_ready = False
         self._whisper_installing = False
+        self._whisper_loading = True
         self._pyannote_installing = False
         self._pyannote_loading = True
         self._processing = False
@@ -1054,6 +1055,7 @@ class MainWindow(QWidget):
 
     def _on_whisper_ready(self, success):
         self.whisper_ready = success
+        self._whisper_loading = False
         self._update_controls()
 
     def _on_pyannote_ready(self, success):
@@ -1091,6 +1093,7 @@ class MainWindow(QWidget):
             not self.whisper_ready
             and not self.recording
             and not self._whisper_installing
+            and not self._whisper_loading
         )
         self.install_pyannote_button.setEnabled(
             self.whisper_ready
