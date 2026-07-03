@@ -586,12 +586,14 @@ class TranscriptionEngine:
             waveform = waveform[np.newaxis, :]
         else:
             waveform = waveform.T
-        waveform = torch.from_numpy(waveform)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        waveform = torch.from_numpy(waveform).to(device)
         if on_status:
             on_status("Running speaker diarization...")
-        result = self.pyannote.get_pipeline()(
-            {"waveform": waveform, "sample_rate": sr}, batch_size=PYANNOTE_BATCH
-        )
+        with torch.no_grad():
+            result = self.pyannote.get_pipeline()(
+                {"waveform": waveform, "sample_rate": sr}, batch_size=PYANNOTE_BATCH
+            )
         speaker_segments = result.exclusive_speaker_diarization
         del waveform
         speakers = {label for _, _, label in speaker_segments.itertracks(yield_label=True)}
@@ -863,6 +865,7 @@ class MainWindow(QWidget):
         self.progress_bar.setVisible(False)
         self.duration_label = QLabel("00:00:00")
         self.duration_label.setAlignment(Qt.AlignCenter)
+        self.duration_label.setObjectName("timerLabel")
         self.language_label = QLabel("Transcription language")
         self.language_label.setAlignment(Qt.AlignCenter)
         self.language_combo = QComboBox()
@@ -951,16 +954,24 @@ class MainWindow(QWidget):
         self.install_pyannote_button.clicked.connect(self._on_install_pyannote_clicked)
 
         lay = QVBoxLayout(self)
-        lay.addWidget(self.status_label)
-        lay.addWidget(self.progress_bar)
+        status_grp = QVBoxLayout()
+        status_grp.setSpacing(2)
+        status_grp.setContentsMargins(0, 0, 0, 0)
+        status_grp.addWidget(self.status_label)
+        status_grp.addWidget(self.progress_bar)
+        lay.addLayout(status_grp)
         lay.addWidget(self.cancel_button)
         lay.addWidget(self.duration_label)
         lay.addWidget(self.mic_level_widget)
         lay.addWidget(self.speaker_level_widget)
         lay.addWidget(self.install_whisper_button)
         lay.addWidget(self.install_pyannote_button)
-        lay.addWidget(self.language_label)
-        lay.addWidget(self.language_combo)
+        lang_grp = QVBoxLayout()
+        lang_grp.setSpacing(3)
+        lang_grp.setContentsMargins(0, 0, 0, 0)
+        lang_grp.addWidget(self.language_label)
+        lang_grp.addWidget(self.language_combo)
+        lay.addLayout(lang_grp)
         chk_row = QHBoxLayout()
         left_col = QVBoxLayout()
         left_col.addWidget(self.transcribe_checkbox)
@@ -1097,18 +1108,19 @@ class MainWindow(QWidget):
         if not can_diarize:
             self.diarization_checkbox.setChecked(False)
         self.diarization_checkbox.setEnabled(can_diarize)
+        whisper_installable = not self.whisper_ready and not self._whisper_loading
+        self.install_whisper_button.setVisible(whisper_installable)
         self.install_whisper_button.setEnabled(
-            not self.whisper_ready
+            whisper_installable
             and not self.recording
             and not self._whisper_installing
-            and not self._whisper_loading
         )
+        pyannote_installable = self.whisper_ready and not self.pyannote_ready and not self._pyannote_loading
+        self.install_pyannote_button.setVisible(pyannote_installable)
         self.install_pyannote_button.setEnabled(
-            self.whisper_ready
-            and not self.pyannote_ready
+            pyannote_installable
             and not self.recording
             and not self._pyannote_installing
-            and not self._pyannote_loading
         )
         self.transcribe_wav_button.setEnabled(
             self.whisper_ready
@@ -1532,6 +1544,14 @@ def _apply_style(app):
             image: none;
         }}
         QCheckBox::indicator:disabled {{ background-color: #F0F0F0; }}
+        QLabel#timerLabel {{
+            font-family: Consolas, "Courier New", monospace;
+            font-size: 26pt;
+            font-weight: bold;
+            color: #1A1A1A;
+            letter-spacing: 1px;
+            padding: 4px 0px;
+        }}
     """)
 
 
