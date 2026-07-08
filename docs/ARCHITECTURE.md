@@ -245,6 +245,8 @@ sequenceDiagram
     end
 ```
 
+> **Output file protection (F-25)**: `_save_transcript()` and `_save_diarized_transcript()` both call `_unique_path()` (CD §6.2) before writing. If `transcript.txt` or `transcript_diarized.txt` already exists in the output folder — for example from a previous transcription of the same recording — a timestamp-suffixed variant is created instead. The original file is never modified or overwritten.
+
 ### 3.4 Token Management Flow
 
 ```mermaid
@@ -305,6 +307,67 @@ sequenceDiagram
     GUI->>User: "Completed" dialog with folder path
 ```
 
+### 3.6 Settings & Preferences Lifecycle
+
+This flow describes how application parameters (F-33) are loaded once at module startup and how UI preferences (F-32) are saved on close and restored at next launch.
+
+```mermaid
+sequenceDiagram
+    participant FS as Filesystem
+    participant App as Startup (module level)
+    participant GUI as MainWindow
+
+    Note over App: Executed before MainWindow.__init__
+    App->>FS: _load_config() — reads config.json; creates with defaults if absent
+    FS-->>App: model_size, beam_size, cuda_bin_dir, vad, …  (F-33)
+    App->>FS: _load_settings() — reads settings.json; returns defaults if absent
+    FS-->>App: transcribe, diarization, mic_enabled, language, devices, …
+
+    Note over App,GUI: Inside MainWindow.__init__ — step 6
+    App->>GUI: _apply_settings(s) — populate checkboxes, language and device combos
+    Note over GUI: UI reflects the state saved at last close  (F-32)
+
+    Note over GUI: On window close
+    GUI->>GUI: closeEvent()
+    GUI->>FS: _save_settings() → write settings.json (current checkbox and combo state)
+    Note over FS: Preferences persisted for next launch  (F-32)
+```
+
+### 3.7 Manual Model Re-installation
+
+The **Install Whisper** and **Install Pyannote** buttons (F-31) allow the user to trigger model installation from an Idle state without restarting the application. Both flows reuse the sub-flows defined in §3.1.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant GUI as MainWindow
+    participant BG as Background Thread
+    participant ASR as ASR Engine
+    participant Dia as Diarization Engine
+
+    Note over GUI: Install buttons visible only when respective model is not ready (§4.6)
+
+    alt Reinstall Whisper (F-31)
+        User->>GUI: Click "Install Whisper"
+        GUI->>GUI: _on_install_whisper_clicked() — mark installing, update controls
+        GUI->>BG: Start _run_whisper_install thread
+        Note right of BG: Same prompt + load sequence as §3.1
+        BG->>ASR: is_installed()? — prompt user if not present
+        BG->>ASR: load() — CUDA → CPU fallback
+        BG-->>GUI: whisper_ready(True/False) signal
+        GUI->>GUI: _on_whisper_ready() — mark ready or show error, update controls
+    end
+
+    alt Reinstall Pyannote (F-31)
+        User->>GUI: Click "Install Pyannote"
+        GUI->>GUI: _on_install_pyannote_clicked() — mark installing, update controls
+        GUI->>BG: Start _run_pyannote_install thread
+        Note right of BG: Delegates to _initialize_pyannote() — see §3.1
+        BG-->>GUI: pyannote_ready(True/False) signal
+        GUI->>GUI: _on_pyannote_ready() — mark ready or show error, update controls
+    end
+```
+
 ---
 
 ## 4. Cross-Cutting Concerns
@@ -334,16 +397,60 @@ To satisfy NF-01 (GUI visible within 2 seconds), all heavyweight libraries are i
 The GUI window is rendered and shown before any model loading begins. The background model-loading thread is started after the window is visible.
 
 ### 4.6 UI State Management
-`MainWindow._update_controls()` is invoked on every state change and enforces the following rules:
 
-| Rule | Requirement |
+`MainWindow._update_controls()` is invoked on every state change and determines the enabled/visible state of every interactive control. The application cycles through five states:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> ModelLoading : application launch
+
+    ModelLoading --> Idle       : initial_load_complete signal
+    ModelLoading --> Installing : Install button clicked during loading
+
+    Idle --> Recording  : Start Recording (≥1 source, models ready)
+    Idle --> Processing : Transcribe WAV file…
+    Idle --> Installing : Install Whisper / Install Pyannote clicked
+
+    Recording --> Processing : Stop Recording
+
+    Installing --> Idle : install finished (success or failure)
+
+    Processing --> Idle      : finished / error signal
+    Processing --> Cancelling: Cancel clicked
+
+    Cancelling --> Idle : cancelled signal
+```
+
+**Control state per application state** (✓ enabled/visible · off disabled · locked disabled+not toggleable · — hidden):
+
+| Control | ModelLoading | Installing | Idle | Recording | Processing | Cancelling |
+|---|---|---|---|---|---|---|
+| Start button | off | off | ✓ if ≥1 source + models ready | off | off | off |
+| Cancel button | — | — | — | — | ✓ | off |
+| Mute Mic button | — | — | — | ✓ if mic active | — | — |
+| Transcribe WAV button | off | off | ✓ if Whisper ready | off | off | off |
+| Install Whisper button | ✓ if model missing | off | ✓ if Whisper not ready | — | — | — |
+| Install Pyannote button | ✓ if Whisper ok + Dia missing | off | ✓ if Whisper ok + Dia not ready | — | — | — |
+| Source checkboxes | locked | locked | ✓ | locked | locked | locked |
+| Device selectors | locked | locked | ✓ if source checked | locked | locked | locked |
+| Language selector | off | off | ✓ if Whisper ready | locked | locked | locked |
+| Transcription checkbox | off | off | ✓ if Whisper ready | locked | locked | locked |
+| Diarization checkbox | off | off | ✓ if both models ready + transcription on | locked | locked | locked |
+
+**SRS requirements enforced by this mechanism:**
+
+| Rule | SRS requirement |
 |---|---|
-| **Start** enabled only when ≥ 1 source checked, models ready, no active recording | F-09 |
-| **Diarization** checkbox enabled only when **Transcription** is also checked | F-19 |
-| **Cancel** visible only during active transcription/processing | F-14 |
-| **Mute Mic** enabled only during active recording with mic source on | F-06 |
-| Device combo boxes disabled during active recording | NF-12 |
-| Install buttons re-enabled whenever models are missing or failed to load | F-31 |
+| Start requires ≥ 1 source and models ready | F-09 |
+| Language selector enabled only when Whisper is loaded | F-12, F-13 |
+| Transcription checkbox enabled only when Whisper is loaded | F-11 |
+| Diarization requires both models and transcription active | F-18, F-19 |
+| Cancel visible only during active processing | F-14 |
+| Mute Mic only during active recording with mic source | F-06 |
+| All controls locked during recording / processing | NF-12 |
+| Install buttons re-enabled when respective model is missing or failed | F-31 |
 
 This ensures controls that are inapplicable in the current state are always visually disabled (NF-12).
 
@@ -360,67 +467,67 @@ The **Architecture Ref** column contains section numbers within *this document*:
 
 ### 5.1 Functional Requirements
 
-| Req ID | Summary | Component(s) | Architecture Ref |
-|---|---|---|---|
-| F-01 | Record from microphone | AudioRecorder | §2.2, §3.2 |
-| F-02 | Record speaker loopback | AudioRecorder | §2.2, §3.2 |
-| F-03 | Enable/disable each audio source | MainWindow, AudioRecorder | §2.2, §3.2 |
-| F-04 | Select specific microphone device | MainWindow, AudioRecorder | §2.2, §3.2 |
-| F-05 | Select specific speaker device | MainWindow, AudioRecorder | §2.2, §3.2 |
-| F-06 | Mute microphone during recording | MainWindow, AudioRecorder | §3.2, §4.6 |
-| F-07 | Real-time audio level indicators | MainWindow, AudioRecorder | §3.2 |
-| F-08 | Elapsed recording timer | MainWindow | §3.2 |
-| F-09 | Require at least one active source | MainWindow | §4.6 |
-| F-10 | Automatic speech transcription | ASREngine, TranscriptionEngine | §2.2, §3.3 |
-| F-11 | Enable/disable transcription | MainWindow, TranscriptionEngine | §2.2, §3.3 |
-| F-12 | Transcription language selection | MainWindow | §2.2 |
-| F-13 | Supported languages (IT, EN, FR, auto) | MainWindow | §2.2 |
-| F-14 | Cancel in-progress transcription | MainWindow, Signals | §3.3 |
-| F-15 | Partial transcript on cancellation | ASREngine, TranscriptionEngine | §3.3 |
-| F-16 | Transcribe a pre-existing WAV file | MainWindow, TranscriptionEngine | §3.5 |
-| F-17 | Identify and label speakers | DiarizationEngine, TranscriptionEngine | §2.2, §3.3 |
-| F-18 | Enable/disable speaker identification | MainWindow | §2.2, §4.6 |
-| F-19 | Diarization requires transcription | MainWindow | §4.6 |
-| F-20 | Speaker-to-word assignment | TranscriptionEngine | §3.3 |
-| F-21 | Session saved in timestamped folder | MainWindow | §3.3 |
-| F-22 | Transcript file with timestamps | TranscriptionEngine | §3.3 |
-| F-23 | Diarized transcript with speaker labels | TranscriptionEngine | §3.3 |
-| F-24 | Audio saved alongside transcripts | AudioRecorder, MainWindow | §3.3 |
-| F-25 | Existing output files never overwritten | TranscriptionEngine | §3.3 |
-| F-35 | Open output folder from completion dialog | MainWindow | §3.3 |
-| F-26 | Prompt to download Whisper on first run | MainWindow, Signals | §3.1 |
-| F-27 | Auto-download pyannote if token present | MainWindow, DiarizationEngine | §3.1 |
-| F-28 | Guided token entry procedure | PyannoteSetupDialog | §3.1, §3.4 |
-| F-29 | Validate token before model download | DiarizationEngine | §3.4 |
-| F-30 | Discard invalid/revoked token | DiarizationEngine | §3.4 |
-| F-31 | Manual model re-installation | MainWindow | §3.1, §4.6 |
-| F-32 | Restore UI preferences at startup | MainWindow | §4.4 |
-| F-33 | Configurable parameters via plain-text file | MainWindow (startup) | §4.4 |
-| F-34 | Secure token storage in OS credential store | DiarizationEngine | §3.4 |
+| Req ID | Summary | Component(s) | Architecture Ref | Detailed Requirements (DR) |
+|---|---|---|---|---|
+| F-01 | Record from microphone | AudioRecorder | §2.2, §3.2 | DR-063, DR-065, DR-067, DR-089, DR-090, DR-094, DR-095 |
+| F-02 | Record speaker loopback | AudioRecorder | §2.2, §3.2 | DR-061, DR-065, DR-066, DR-085, DR-086, DR-093, DR-095 |
+| F-03 | Enable/disable each audio source | MainWindow, AudioRecorder | §2.2, §3.2 | DR-062, DR-064, DR-073, DR-076, DR-149, DR-151 |
+| F-04 | Select specific microphone device | MainWindow, AudioRecorder | §2.2, §3.2 | DR-088, DR-169 |
+| F-05 | Select specific speaker device | MainWindow, AudioRecorder | §2.2, §3.2 | DR-084, DR-170 |
+| F-06 | Mute microphone during recording | MainWindow, AudioRecorder | §3.2, §4.6 | DR-069, DR-070, DR-091, DR-198, DR-199 |
+| F-07 | Real-time audio level indicators | MainWindow, AudioRecorder | §3.2 | DR-079–DR-083, DR-148, DR-150, DR-175 |
+| F-08 | Elapsed recording timer | MainWindow | §3.2 | DR-173, DR-174 |
+| F-09 | Require at least one active source | MainWindow | §4.6 | DR-168, DR-171, DR-172 |
+| F-10 | Automatic speech transcription | ASREngine, TranscriptionEngine | §2.2, §3.3 | DR-024, DR-026, DR-028, DR-098, DR-099, DR-105, DR-152, DR-156, DR-162 |
+| F-11 | Enable/disable transcription | MainWindow, TranscriptionEngine | §2.2, §3.3, §4.6 | DR-154, DR-161, DR-181, DR-200 |
+| F-12 | Transcription language selection | MainWindow | §2.2, §4.6 | DR-025, DR-162 |
+| F-13 | Supported languages (IT, EN, FR, auto) | MainWindow | §2.2, §4.6 | — |
+| F-14 | Cancel in-progress transcription | MainWindow, Signals | §3.3 | DR-027, DR-100, DR-101, DR-157, DR-159, DR-194, DR-196 |
+| F-15 | Partial transcript on cancellation | ASREngine, TranscriptionEngine | §3.3 | DR-027, DR-100, DR-101, DR-157, DR-159, DR-195 |
+| F-16 | Transcribe a pre-existing WAV file | MainWindow, TranscriptionEngine | §3.5 | DR-158, DR-159, DR-160, DR-166 |
+| F-17 | Identify and label speakers | DiarizationEngine, TranscriptionEngine | §2.2, §3.3 | DR-056, DR-057, DR-102, DR-106, DR-107, DR-126, DR-127, DR-145, DR-146, DR-163, DR-178 |
+| F-18 | Enable/disable speaker identification | MainWindow | §2.2, §4.6 | DR-163, DR-182, DR-183 |
+| F-19 | Diarization requires transcription | MainWindow | §4.6 | DR-136, DR-163 |
+| F-20 | Speaker-to-word assignment | TranscriptionEngine | §3.3 | DR-115–DR-127 |
+| F-21 | Session saved in timestamped folder | MainWindow | §3.3 | DR-152 |
+| F-22 | Transcript file with timestamps | TranscriptionEngine | §3.3 | DR-009–DR-014, DR-099, DR-103–DR-105, DR-156 |
+| F-23 | Diarized transcript with speaker labels | TranscriptionEngine | §3.3 | DR-102, DR-110–DR-112 |
+| F-24 | Audio saved alongside transcripts | AudioRecorder, MainWindow | §3.3 | DR-078, DR-154 |
+| F-25 | Existing output files never overwritten | TranscriptionEngine | §3.3 | DR-103, DR-104, DR-110, DR-111, DR-113, DR-114 |
+| F-35 | Open output folder from completion dialog | MainWindow | §3.3 | DR-192, DR-193 |
+| F-26 | Prompt to download Whisper on first run | MainWindow, Signals | §3.1 | DR-017, DR-018, DR-131–DR-133, DR-135, DR-176, DR-177, DR-184, DR-185 |
+| F-27 | Auto-download pyannote if token present | MainWindow, DiarizationEngine | §3.1 | DR-033–DR-035, DR-051, DR-053, DR-130, DR-137–DR-139, DR-144 |
+| F-28 | Guided token entry procedure | PyannoteSetupDialog | §3.1, §3.4 | DR-043, DR-052, DR-128–DR-130, DR-141–DR-143, DR-186–DR-188 |
+| F-29 | Validate token before model download | DiarizationEngine | §3.4 | DR-036, DR-052, DR-054, DR-128 |
+| F-30 | Discard invalid/revoked token | DiarizationEngine | §3.4 | DR-047, DR-049, DR-054, DR-129, DR-140 |
+| F-31 | Manual model re-installation | MainWindow | §3.1, §3.7, §4.6 | DR-164, DR-165, DR-201–DR-206 |
+| F-32 | Restore UI preferences at startup | MainWindow | §3.6, §4.4 | DR-004–DR-008, DR-180, DR-182, DR-207–DR-209 |
+| F-33 | Configurable parameters via plain-text file | MainWindow (startup) | §3.6, §4.4 | DR-001–DR-003 |
+| F-34 | Secure token storage in OS credential store | DiarizationEngine | §3.4 | DR-029–DR-050 |
 
 ### 5.2 Non-Functional Requirements
 
-| Req ID | Summary | Component(s) | Architecture Ref |
-|---|---|---|---|
-| NF-01 | GUI appears within 2 seconds of launch | MainWindow, all AI components (lazy imports) | §4.5 |
-| NF-02 | Level indicators update ≤ 100 ms | MainWindow (80 ms timer), AudioRecorder | §3.2 |
-| NF-03 | GPU acceleration where available | ASREngine, DiarizationEngine | §3.1 |
-| NF-04 | Automatic CPU fallback if no GPU | ASREngine | §3.1 |
-| NF-05 | Log all errors to daily log files | All components (shared logger) | §4.2 |
-| NF-06 | Capture unhandled exceptions | `sys.excepthook` (module level) | §4.2 |
-| NF-07 | Device failure does not discard captured audio | AudioRecorder | §3.3 |
-| NF-08 | Notify user of audio device failures | AudioRecorder, Signals, MainWindow | §3.3 |
-| NF-09 | Token not stored in plain text (if keyring available) | DiarizationEngine | §3.4 |
-| NF-10 | No sensitive data in log files | DiarizationEngine | §4.2 |
-| NF-11 | Single application instance | MainWindow (port lock) | §4.3 |
-| NF-12 | Inapplicable controls visually disabled | MainWindow | §4.6 |
-| NF-13 | Recognisable taskbar and title bar icon | `_make_app_icon()` | §4.7 |
+| Req ID | Summary | Component(s) | Architecture Ref | Detailed Requirements (DR) |
+|---|---|---|---|---|
+| NF-01 | GUI appears within 2 seconds of launch | MainWindow, all AI components (lazy imports) | §4.5 | DR-019, DR-056 |
+| NF-02 | Level indicators update ≤ 100 ms | MainWindow (80 ms timer), AudioRecorder | §3.2 | DR-082, DR-175 |
+| NF-03 | GPU acceleration where available | ASREngine, DiarizationEngine | §3.1 | DR-020, DR-059, DR-109 |
+| NF-04 | Automatic CPU fallback if no GPU | ASREngine | §3.1 | DR-021, DR-022, DR-060 |
+| NF-05 | Log all errors to daily log files | All components (shared logger) | §4.2 | DR-023, DR-032, DR-045, DR-087, DR-092, DR-135, DR-147, DR-155, DR-158, DR-188, DR-197, DR-204, DR-208, DR-212 |
+| NF-06 | Capture unhandled exceptions | `sys.excepthook` (module level) | §4.2 | — (module-level hook, no DR) |
+| NF-07 | Device failure does not discard captured audio | AudioRecorder | §3.3 | DR-071, DR-072, DR-074, DR-075, DR-077 |
+| NF-08 | Notify user of audio device failures | AudioRecorder, Signals, MainWindow | §3.3 | DR-077, DR-087, DR-092, DR-153, DR-155, DR-189–DR-191, DR-197 |
+| NF-09 | Token not stored in plain text (if keyring available) | DiarizationEngine | §3.4 | DR-029, DR-031, DR-038, DR-044, DR-045 |
+| NF-10 | No sensitive data in log files | DiarizationEngine | §4.2 | — (enforced by implementation discipline; token values never passed to logger) |
+| NF-11 | Single application instance | MainWindow (port lock) | §4.3 | — (module-level socket bind, no DR) |
+| NF-12 | Inapplicable controls visually disabled | MainWindow | §4.6 | DR-161–DR-172, DR-181, DR-183, DR-200 |
+| NF-13 | Recognisable taskbar and title bar icon | `_make_app_icon()` | §4.7 | — (generated icon, no DR) |
 
 ### 5.3 Constraints
 
-| Req ID | Constraint | Impacted Component(s) | Notes |
-|---|---|---|---|
-| C-01 | Speaker loopback is Windows-only | AudioRecorder | Uses Windows WASAPI via `soundcard`; loopback API not available on other OS |
-| C-02 | Requires Python 3.10 or later | All | Use of `match` syntax, `Path` improvements, and type-union hints (`X \| Y`) |
-| C-03 | GPU requires NVIDIA + compatible driver | ASREngine, DiarizationEngine | CUDA path set via `os.add_dll_directory`; non-NVIDIA GPUs ignored |
-| C-04 | pyannote models require HuggingFace license acceptance | DiarizationEngine, PyannoteSetupDialog | Download blocked by HuggingFace until user accepts terms via web UI |
+| Req ID | Constraint | Impacted Component(s) | Notes | Detailed Requirements (DR) |
+|---|---|---|---|---|
+| C-01 | Speaker loopback is Windows-only | AudioRecorder | Uses Windows WASAPI via `soundcard`; loopback API not available on other OS | DR-061, DR-085, DR-086 |
+| C-02 | Requires Python 3.10 or later | All | Use of `match` syntax, `Path` improvements, and type-union hints (`X \| Y`) | — |
+| C-03 | GPU requires NVIDIA + compatible driver | ASREngine, DiarizationEngine | CUDA path set via `os.add_dll_directory`; non-NVIDIA GPUs ignored | DR-020, DR-059 |
+| C-04 | pyannote models require HuggingFace license acceptance | DiarizationEngine, PyannoteSetupDialog | Download blocked by HuggingFace until user accepts terms via web UI | DR-128–DR-130 |

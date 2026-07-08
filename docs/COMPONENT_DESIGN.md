@@ -1,4 +1,4 @@
-# Component Design Specification
+﻿# Component Design Specification
 ## Meeting Transcriber v1.0.0
 
 > **Scope**: white-box description of every component. For each class all public and private methods are listed with their signature, parameters, return value and behaviour. Module-level helpers are included.
@@ -58,6 +58,13 @@ Loads `config.json` from `SCRIPT_DIR`. If the file does not exist it is created 
 **Side effects**: may create `config.json`.  
 **Errors**: silent on JSON parse failure (returns defaults).
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-001 | If `config.json` does not exist, it is created with the default configuration and those defaults are returned. |
+| DR-002 | If `config.json` exists and contains valid content, the loaded values are merged over the defaults and the merged result is returned. |
+| DR-003 | If `config.json` exists but cannot be parsed, the error is silently ignored, the file is overwritten with the defaults, and the defaults are returned. |
 ---
 
 #### `_load_settings() -> dict`
@@ -67,6 +74,13 @@ Loads `settings.json` from `SCRIPT_DIR`. Returns `_SETTINGS_DEFAULTS` if the fil
 **Returns**: `dict` — merged UI settings.  
 **Errors**: silent on failure.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-004 | If `settings.json` does not exist, the default settings are returned without creating the file. |
+| DR-005 | If `settings.json` exists and contains valid content, the loaded values are merged over the defaults and the merged result is returned. |
+| DR-006 | If `settings.json` exists but cannot be parsed, the error is silently ignored and the defaults are returned. |
 ---
 
 #### `_combo_set_data(combo: QComboBox, value: Any) -> None`
@@ -78,6 +92,12 @@ Selects the item in `combo` whose `itemData()` equals `value`. No-op if no item 
 | `combo` | `QComboBox` | The combo box to update |
 | `value` | `Any` | Data value to match (e.g. device ID string or language code) |
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-007 | If an item in `combo` whose associated data equals `value` is found, that item is selected and the function returns. |
+| DR-008 | If no item matches `value`, the combo box selection is unchanged. |
 ---
 
 #### `format_timestamp(seconds: float) -> str`
@@ -90,6 +110,17 @@ Converts a floating-point number of seconds to `HH:MM:SS.mmm` format.
 
 **Returns**: `str` — formatted timestamp, e.g. `"00:01:23.456"`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-009 | No conditional branches; single arithmetic path. The following input classes cover all output fields: |
+| DR-010 | Zero seconds produces `"00:00:00.000"`. |
+| DR-011 | A sub-second value (e.g. `0.5`) produces a non-zero milliseconds field with all other fields zero. |
+| DR-012 | A value under 60 s (e.g. `45.0`) produces zero hours and minutes. |
+| DR-013 | A value between 60 s and 3600 s (e.g. `90.0`) produces a non-zero minutes field and zero hours. |
+| DR-014 | A value over 3600 s (e.g. `3723.456`) produces non-zero values in all three fields. |
+
 ---
 
 #### `_get_audio_devices() -> tuple[list[tuple[str,str]], list[tuple[str,str]]]`
@@ -99,6 +130,12 @@ Enumerates available audio devices using `soundcard`.
 **Returns**: `(mics, speakers)` where each element is a list of `(name, id_str)` tuples. Both lists are empty on failure.  
 **Errors**: caught internally; logs a warning and returns empty lists.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-015 | If audio device enumeration succeeds, two populated lists are returned — one of microphones and one of speakers. |
+| DR-016 | If enumeration raises any exception (e.g. the audio library is unavailable or no hardware is present), a warning is logged and two empty lists are returned. |
 ---
 
 #### `_make_app_icon() -> QIcon`
@@ -174,6 +211,12 @@ Checks whether the model cache directory for the configured `MODEL_SIZE` exists 
 
 **Returns**: `True` if the expected directory is present.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-017 | If the expected model cache directory exists on disk, the function returns `True`. |
+| DR-018 | If the directory does not exist, the function returns `False`. |
 ---
 
 #### `load(on_status: Callable[[str], None] | None = None) -> None`
@@ -187,6 +230,15 @@ Loads the Whisper model. First attempts CUDA (`float16`); on any failure falls b
 **Raises**: `RuntimeError` — if both CUDA and CPU load attempts fail. The message is a user-friendly string derived from the exception.  
 **Side effects**: sets `self.model`; imports `faster_whisper.WhisperModel` lazily.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-019 | If `on_status` is provided, it is called with an appropriate status message before loading begins; if omitted, no callback is made. |
+| DR-020 | If the model loads successfully on GPU, it is used and the function returns without attempting CPU loading. |
+| DR-021 | If GPU loading fails for any reason, a warning is logged and loading is retried on CPU. |
+| DR-022 | If CPU loading succeeds after GPU failure, the CPU model is used. |
+| DR-023 | If both GPU and CPU loading fail, a `RuntimeError` is raised with a user-readable error message. |
 ---
 
 #### `transcribe(wav: str | Path, language: str | None = None, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> list`
@@ -203,6 +255,15 @@ Transcribes a WAV file. Iterates the segment generator and stops early if `cance
 **Returns**: `list[Segment]` — list of faster-whisper `Segment` objects (may be partial if cancelled).  
 **Configuration used**: `BEAM_SIZE`, `VAD` (read from module globals at call time).
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-024 | If `on_status` is provided, it is called before transcription begins; if omitted, no callback is made. |
+| DR-025 | If `language` is specified, it is passed to the model; if omitted, the model auto-detects the language. |
+| DR-026 | If `cancel_event` is not provided or is never signalled, transcription runs to completion and all segments are returned. |
+| DR-027 | If `cancel_event` is signalled during iteration, transcription stops at the current segment and the partial list collected so far is returned. |
+| DR-028 | If the model produces no speech segments, an empty list is returned. |
 ---
 
 ## 4. Class: `PyannoteManager`
@@ -224,6 +285,14 @@ def __init__(self, base_dir: str | Path)
 **Initialises**: `self.base_dir`, `self.models_dir`, `self.token_file` (fallback path), `self.pipeline = None`.  
 **Side effect**: if `keyring` is available and `token.txt` exists, migrates the token to the OS credential store and deletes the file.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-029 | If the OS credential store is not available (`_KEYRING_AVAILABLE` is `False`), the token migration is skipped entirely. |
+| DR-030 | If the OS credential store is available but no plain-text token file exists, migration is skipped. |
+| DR-031 | If the OS credential store is available, a plain-text token file exists, and saving to the credential store succeeds, the token is migrated and the plain-text file is deleted. |
+| DR-032 | If saving to the credential store fails, a warning is logged and the plain-text file is kept as a fallback. |
 ### 4.2 Methods
 
 ---
@@ -232,12 +301,27 @@ def __init__(self, base_dir: str | Path)
 
 Returns `True` if a pyannote model directory exists under `models_dir`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-033 | If the standard pyannote model directory exists, the function returns `True`. |
+| DR-034 | If the standard directory is absent but any other directory whose name starts with `models--pyannote` is found in the models folder, the function still returns `True`. |
+| DR-035 | If no matching directory exists at all, the function returns `False`. |
 ---
 
 #### `token_exists() -> bool`
 
 Returns `True` if a HuggingFace token is available — checks the OS credential store first, then falls back to `token.txt`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-036 | If the OS credential store is available and a token is found there, the function returns `True`. |
+| DR-037 | If the OS credential store is available but returns no token, the function returns `False` without checking the fallback file. |
+| DR-038 | If querying the OS credential store raises an error, a warning is logged and the result falls back to checking whether the plain-text token file exists. |
+| DR-039 | If the OS credential store is not available, the function returns whether the plain-text token file exists. |
 ---
 
 #### `load_token() -> str | None`
@@ -246,6 +330,14 @@ Retrieves the stored HuggingFace token. Preference order: OS credential store �
 
 **Returns**: token string, or `None` if not found.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-040 | If the OS credential store is available and contains a non-empty token, that token is returned immediately. |
+| DR-041 | If the OS credential store is available but returns nothing, or if querying it raises an error (in which case a warning is logged), the function falls through to the plain-text file check. |
+| DR-042 | If the plain-text token file exists, its content is read, stripped of whitespace, and returned. |
+| DR-043 | If neither the credential store nor the plain-text file provides a token, `None` is returned. |
 ---
 
 #### `save_token(token: str) -> None`
@@ -256,12 +348,27 @@ Persists the token. Preference order: OS credential store → `token.txt` (fallb
 |---|---|---|
 | `token` | `str` | The HuggingFace access token (stripped of whitespace before saving) |
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-044 | If the OS credential store is available and saving to it succeeds, the token (stripped of whitespace) is persisted there and the function returns. |
+| DR-045 | If the OS credential store is available but saving fails, a warning is logged and the token is written to the plain-text fallback file instead. |
+| DR-046 | If the OS credential store is not available, the token is written directly to the plain-text file. |
 ---
 
 #### `delete_token() -> None`
 
 Deletes the token from both the OS credential store and `token.txt` if they exist.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-047 | If the OS credential store is available, deletion from it is attempted; a failure logs a warning but does not stop execution. |
+| DR-048 | If the OS credential store is not available, the credential-store step is skipped entirely. |
+| DR-049 | If the plain-text token file exists, it is deleted. |
+| DR-050 | If the plain-text token file does not exist, no file operation is performed. |
 ---
 
 #### `download_models() -> None`
@@ -271,6 +378,15 @@ Downloads the pyannote model using the stored token. Does **not** load the pipel
 **Raises**: `RuntimeError` — if pyannote is not installed or the token is missing.  
 **Raises**: re-raises any `Exception` from `Pipeline.from_pretrained`. If the error is an authentication/licence failure (HTTP 401/403 or related keywords), the token is deleted before re-raising.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-051 | If the pyannote library is not installed, a `RuntimeError` is raised immediately before attempting any download. |
+| DR-052 | If the library is installed but no HuggingFace token is stored, a `RuntimeError` is raised. |
+| DR-053 | If the download completes successfully, the function returns without raising. |
+| DR-054 | If the download fails due to an authentication or licence error (e.g. invalid token, access not granted to the model), the stored token is deleted before the error is propagated. |
+| DR-055 | If the download fails for any other reason (e.g. network error), the token is left intact and the error is propagated as-is. |
 ---
 
 #### `get_pipeline() -> Pipeline`
@@ -281,12 +397,25 @@ Returns the loaded pyannote pipeline, loading it lazily on first call.
 **Raises**: `RuntimeError` — if pyannote is not importable.  
 **Side effect** (on first call): imports `torch` and `pyannote.audio.Pipeline`, calls `Pipeline.from_pretrained`, moves pipeline to CUDA if available.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-056 | If the pipeline has already been loaded in a previous call, the cached instance is returned without re-loading. |
+| DR-057 | If the pipeline has not yet been loaded, it is loaded now and the instance is returned. |
 ---
 
 #### `_initialize_pipeline() -> None` *(private)*
 
 Internal: loads the pipeline from the local model cache and moves it to GPU if available.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-058 | If the pyannote library is not installed, a `RuntimeError` is raised. |
+| DR-059 | If a GPU is available, the pipeline is loaded and then moved to the GPU. |
+| DR-060 | If no GPU is available, the pipeline is loaded and runs on CPU. |
 ---
 
 ## 5. Class: `AudioRecorder`
@@ -331,12 +460,28 @@ Resets all buffers and starts the enabled capture threads.
 | `mic_id` | `str \| None` | Device ID string for mic; `None` uses system default |
 | `on_device_error` | `callable \| None` | Called with an error string if a device fails during recording |
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-061 | If `enable_speaker` is `True`, speaker loopback capture starts on a background thread. |
+| DR-062 | If `enable_speaker` is `False`, no speaker capture occurs. |
+| DR-063 | If `enable_mic` is `True`, microphone capture starts on a background thread. |
+| DR-064 | If `enable_mic` is `False`, no microphone capture occurs. |
 ---
 
 #### `stop() -> None`
 
 Signals all capture threads to stop by setting `_stop_event`, then joins them. Blocks until both threads terminate.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-065 | If the speaker capture thread is running, it is signalled to stop and the function waits for it to finish. |
+| DR-066 | If the speaker thread was never started or has already terminated, the wait is skipped. |
+| DR-067 | If the microphone capture thread is running, it is signalled to stop and the function waits for it to finish. |
+| DR-068 | If the microphone thread was never started or has already terminated, the wait is skipped. |
 ---
 
 #### `mute_mic(muted: bool) -> None`
@@ -349,6 +494,12 @@ Toggles microphone muting. Thread-safe (single boolean write under the GIL).
 
 **Behaviour**: when muted, `_record_microphone` appends zero-filled arrays instead of real audio, preserving timeline alignment in the final mix.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-069 | If `muted` is `True`, subsequent microphone capture produces silence instead of real audio. |
+| DR-070 | If `muted` is `False`, subsequent microphone capture resumes real audio. |
 ---
 
 #### `save_wav(output_dir: str | Path, on_status: Callable | None = None) -> Path`
@@ -364,6 +515,18 @@ Validates captured audio, mixes streams, normalises, and writes a WAV file.
 **Raises**: `RuntimeError` — if any enabled source has an error or captured no audio. The message lists all failures.  
 **Side effect**: clears `_speaker_chunks` and `_mic_chunks` after mixing to free memory.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-071 | If speaker capture was enabled and a device error occurred during recording, that error contributes to a `RuntimeError`. |
+| DR-072 | If speaker capture was enabled, no device error occurred, but no audio was recorded, a "no audio captured" failure contributes to a `RuntimeError`. |
+| DR-073 | If speaker capture was disabled, the speaker validation step is skipped entirely. |
+| DR-074 | If microphone capture was enabled and a device error occurred, that error contributes to a `RuntimeError`. |
+| DR-075 | If microphone capture was enabled, no device error occurred, but no audio was recorded, a "no audio captured" failure contributes to a `RuntimeError`. |
+| DR-076 | If microphone capture was disabled, the microphone validation step is skipped entirely. |
+| DR-077 | If any validation failure was collected, a `RuntimeError` listing all failures is raised and no file is written. |
+| DR-078 | If all validations pass, `on_status` is called if provided, the streams are mixed and normalised, a WAV file is written, and its path is returned. |
 ---
 
 #### `get_levels() -> tuple[int, int]`
@@ -373,18 +536,44 @@ Computes the current audio level for each active source from the last captured c
 **Returns**: `(mic_level, speaker_level)` — each an integer in `[0, 100]`. Disabled sources return `0`.  
 **Algorithm**: RMS of the last chunk → dBFS → linear scale mapped to `[0, 100]` over a −60 dBFS to 0 dBFS range.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-079 | If microphone capture is disabled, the microphone level is always 0. |
+| DR-080 | If speaker capture is disabled, the speaker level is always 0. |
+| DR-081 | If an enabled source has not yet captured any audio, its level is 0. |
+| DR-082 | If an enabled source has audio data with a positive RMS, the level is a non-zero integer in `[0, 100]`. |
+| DR-083 | If the last captured chunk contains only silence (zero RMS), the level is 0. |
 ---
 
 #### `_record_speaker() -> None` *(private, runs on daemon thread)*
 
 Opens the speaker loopback device and records in a loop until `_stop_event` is set. Appends `float32` numpy arrays to `_speaker_chunks`. On error: sets `speaker_error`, calls `_on_device_error`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-084 | If a specific speaker device ID is provided, that exact device is looked up; if it is not found, an error is recorded and reported via the device-error callback. |
+| DR-085 | If no device ID is provided, the system default speaker is used; if no default exists, an error is recorded and reported. |
+| DR-086 | If the device is opened successfully, audio is captured in a loop until recording is stopped; multi-channel audio is downmixed to mono. |
+| DR-087 | If any error occurs while opening or reading from the device, the error message is stored and the device-error callback is invoked if one was provided. |
 ---
 
 #### `_record_microphone() -> None` *(private, runs on daemon thread)*
 
 Opens the microphone device and records in a loop. When `_mic_muted` is `True`, appends zero arrays. On error: sets `mic_error`, calls `_on_device_error`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-088 | If a specific microphone device ID is provided, that exact device is looked up; if it is not found, an error is recorded and reported via the device-error callback. |
+| DR-089 | If no device ID is provided, the system default microphone is used; if no default exists, an error is recorded and reported. |
+| DR-090 | While recording and not muted, real audio is captured and stored; multi-channel audio is downmixed to mono. |
+| DR-091 | While recording and muted, silence of the same duration is stored instead, preserving timeline alignment with the speaker stream. |
+| DR-092 | If any error occurs while opening or reading from the device, the error message is stored and the device-error callback is invoked if one was provided. |
 ---
 
 #### `_mix() -> np.ndarray` *(private)*
@@ -393,6 +582,15 @@ Concatenates and pads speaker and mic arrays to the same length, sums them, peak
 
 **Returns**: `np.ndarray` (float32, mono) — the normalised mixed audio.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-093 | If the speaker stream contains audio, it is used in the mix; if it is empty, silence is used as a placeholder. |
+| DR-094 | If the microphone stream contains audio, it is used in the mix; if it is empty, silence is used as a placeholder. |
+| DR-095 | If one stream is shorter than the other, the shorter one is zero-padded to match the longer before summing. |
+| DR-096 | If the summed signal's peak amplitude exceeds 1.0, the signal is normalised to 1.0 and then scaled to 0.95. |
+| DR-097 | If the summed signal's peak is 1.0 or below, no normalisation step is applied and the signal is scaled directly to 0.95. |
 ---
 
 ## 6. Class: `TranscriptionEngine`
@@ -429,6 +627,15 @@ Top-level entry point: transcribes the WAV and optionally diarizes.
 **Returns**: `Path` — path to the primary transcript file produced, or `None` if transcription yielded no segments.  
 **Behaviour**: if `cancel_event` is set after transcription but before diarization, returns the plain transcript immediately.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-098 | If transcription produces no speech segments, the function returns `None`. |
+| DR-099 | If transcription produces segments and diarization is disabled, only the plain transcript is written and its path is returned. |
+| DR-100 | If transcription produces segments and diarization is enabled but cancellation is requested before diarization begins, the plain transcript is written and its path is returned without running diarization. |
+| DR-101 | If diarization runs and completes but cancellation is requested before the diarized transcript is written, the plain transcript path is returned. |
+| DR-102 | If diarization runs and completes without cancellation, the diarized transcript is written and its path is returned. |
 ---
 
 #### `_save_transcript(segments: list, output_dir: Path) -> Path` *(private)*
@@ -437,6 +644,13 @@ Writes `transcript.txt` with lines of the form `[HH:MM:SS.mmm] text`.
 
 **Returns**: `Path` to the file. Uses `_unique_path` to avoid overwriting.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-103 | If `transcript.txt` does not already exist in `output_dir`, the file is written at that path. |
+| DR-104 | If `transcript.txt` already exists, a new file with a timestamped name is written instead, leaving the existing file untouched. |
+| DR-105 | Segments whose text content is non-empty are written as lines; segments with blank text are skipped. |
 ---
 
 #### `_run_diarization(wav: Path, on_status: Callable | None = None) -> Annotation` *(private)*
@@ -446,6 +660,14 @@ Loads the WAV with `soundfile`, converts to a torch tensor, runs the pyannote pi
 **Returns**: `pyannote.core.Annotation`.  
 **Side effect**: logs start and completion (with speaker count) at INFO level; imports `torch` lazily; frees the waveform tensor with `del`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-106 | If the WAV file is mono, the audio data is correctly shaped for the pipeline. |
+| DR-107 | If the WAV file is multi-channel, it is converted to the expected channel-first layout before being passed to the pipeline. |
+| DR-108 | If `on_status` is provided, it is called before the pipeline runs; if omitted, no callback is made. |
+| DR-109 | If a GPU is available, the audio data is moved to the GPU before the pipeline call; otherwise it remains on CPU. |
 ---
 
 #### `_save_diarized_transcript(segments: list, speaker_segments: Annotation, output_dir: Path) -> Path` *(private)*
@@ -454,12 +676,25 @@ Calls `_assign_speakers_to_words`, then writes `transcript_diarized.txt` with li
 
 **Returns**: `Path` to the file.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-110 | If `transcript_diarized.txt` does not already exist in `output_dir`, the file is written at that path. |
+| DR-111 | If `transcript_diarized.txt` already exists, a new file with a timestamped name is written instead. |
+| DR-112 | Speaker blocks whose text is non-empty are written as lines; empty blocks are skipped. |
 ---
 
 #### `_unique_path(path: Path) -> Path` *(static)*
 
 Returns `path` unchanged if it does not exist; otherwise appends a `_YYYYMMDD_HHMMSS` suffix to the stem.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-113 | If the given path does not already exist on disk, it is returned unchanged. |
+| DR-114 | If the given path already exists, a new path is returned with a timestamp appended to the file stem. |
 ---
 
 #### `_find_best_speaker(tracks: list, start: float, end: float) -> str | None` *(private)*
@@ -476,6 +711,14 @@ Finds the most likely speaker for a word spanning `[start, end]`.
 
 **Returns**: speaker label string or `None`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-115 | If no speaker segments are available, the function returns `None`. |
+| DR-116 | If the midpoint of the word falls within a speaker segment, that speaker is returned immediately. |
+| DR-117 | If the midpoint falls outside all segments but the nearest segment boundary is within the tolerance threshold (`max(30 ms, 30% of word duration)`), the speaker of the nearest boundary is returned. |
+| DR-118 | If the nearest boundary is beyond the threshold, the function returns `None`. |
 ---
 
 #### `_assign_speakers_to_words(segments: list, speaker_segments: Annotation) -> list[tuple]` *(private)*
@@ -491,6 +734,19 @@ Assigns a speaker to every word across all transcription segments, applies hyste
 
 **Returns**: `list[tuple[float, str, str]]` — list of `(start_time, speaker_label, text)` blocks.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-119 | Transcription segments with no word-level data, or with words that have no text or missing timestamps, are silently skipped. |
+| DR-120 | If no matching speaker is found for a word, the word is attributed to an "UNKNOWN" speaker. |
+| DR-121 | For the first word processed, the initial speaker is assigned directly without any hysteresis check. |
+| DR-122 | A speaker change is accepted only if the new speaker is more than 20% closer than the current one; otherwise the current speaker is kept. |
+| DR-123 | A word labelled as "UNKNOWN" bypasses the hysteresis check and is always assigned as-is. |
+| DR-124 | The isolation-removal pass is skipped when the total word list contains fewer than three elements. |
+| DR-125 | A single word surrounded on both sides by a different speaker (pattern A–B–A) is reassigned to the surrounding speaker. |
+| DR-126 | Consecutive words assigned to the same speaker are merged into a single output block. |
+| DR-127 | When the speaker changes between consecutive words, the current block is closed and a new one is opened. |
 ---
 
 ## 7. Class: `PyannoteSetupDialog`
@@ -523,6 +779,13 @@ Builds the full dialog layout: instructional text, three URL-opening buttons, to
 
 Validates that the token field is non-empty, saves the token via `manager.save_token`, calls `manager.download_models`, and accepts the dialog on success. On failure: re-enables the button and shows a `QMessageBox.critical`. Errors are logged.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-128 | If the token field is empty, a warning dialog is shown and no download is attempted. |
+| DR-129 | If a token is entered but the download fails, an error dialog is shown, the download button is re-enabled, and the dialog remains open. |
+| DR-130 | If a token is entered and the download succeeds, a success message is shown and the dialog closes with an accepted result. |
 ---
 
 ## 8. Class: `MainWindow`
@@ -577,18 +840,47 @@ __init__
 
 Startup sequence: checks Whisper installation → optionally prompts for download → loads Whisper → loads pyannote. Emits `whisper_ready`, `pyannote_ready`, `initial_load_complete`.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-131 | If the Whisper model is already installed, no download prompt is shown and loading proceeds immediately. |
+| DR-132 | If the model is not installed, the user is prompted; if they confirm, loading is attempted. |
+| DR-133 | If the user declines the download, Whisper is marked as unavailable and pyannote loading is also skipped. |
+| DR-134 | If loading succeeds, Whisper is marked as ready and pyannote initialisation proceeds. |
+| DR-135 | If loading fails, an error dialog is shown, Whisper is marked as unavailable, and pyannote loading is skipped. |
+| DR-136 | If Whisper is not ready for any reason, pyannote is immediately marked as unavailable without any attempt to load it. |
 ---
 
 #### `_initialize_pyannote() -> bool` *(background thread)*
 
 Handles the full pyannote setup flow: checks installation, attempts automatic download if token exists, shows setup dialog if not. Returns `True` on success.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-137 | If pyannote models are already installed, the setup phase is skipped and the pipeline is loaded directly. |
+| DR-138 | If models are not installed but a stored token is available, an automatic download is attempted. |
+| DR-139 | If the automatic download succeeds, the pipeline load proceeds. |
+| DR-140 | If the automatic download fails, the invalid token is removed and the user setup dialog is shown. |
+| DR-141 | If no token is stored, the user setup dialog is shown immediately. |
+| DR-142 | If the setup dialog is not completed within the timeout, a `RuntimeError` is raised. |
+| DR-143 | If the user cancels the setup dialog, the function returns `False`. |
+| DR-144 | If after all attempts the models are still not present on disk, the function returns `False`. |
+| DR-145 | If the models are confirmed present, the pipeline load is attempted and its result is returned. |
 ---
 
 #### `_load_pyannote_pipeline() -> bool` *(background thread)*
 
 Calls `pyannote.get_pipeline()`. On failure shows a `messagebox_requested` critical dialog. Returns `True` on success.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-146 | If the pipeline loads without error, the status is set to "Ready" and the function returns `True`. |
+| DR-147 | If loading raises any exception, an error dialog is shown, the status reflects the failure, and the function returns `False`. |
 ### 8.5 Methods — Recording
 
 ---
@@ -597,11 +889,25 @@ Calls `pyannote.get_pipeline()`. On failure shows a `messagebox_requested` criti
 
 Reads current source/device selections, shows level meters, resets mute button, calls `recorder.start(...)`, starts the level timer.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-148 | If the microphone checkbox is checked, the microphone level meter is shown and microphone capture is enabled. |
+| DR-149 | If the microphone checkbox is unchecked, the microphone level meter is hidden and microphone capture is disabled. |
+| DR-150 | If the speaker checkbox is checked, the speaker level meter is shown and speaker capture is enabled. |
+| DR-151 | If the speaker checkbox is unchecked, the speaker level meter is hidden and speaker capture is disabled. |
 ---
 
 #### `_stop_recording() -> None`
 
 Stops the level timer, hides meters, calls `recorder.stop()`, resets mute state, launches `_process_recording` in a background thread.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-152 | single path — all recording state is unconditionally reset and processing is always launched with the current language, transcription, and diarization settings. |
 
 ---
 
@@ -609,38 +915,262 @@ Stops the level timer, hides meters, calls `recorder.stop()`, resets mute state,
 
 Creates the output folder, calls `recorder.save_wav`, then `engine.process`. Emits `finished` or `cancelled` on completion, `error` on exception.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-153 | If saving the audio to WAV fails, an error signal is emitted and no transcription is attempted. |
+| DR-154 | If `enable_transcription` is `False`, the WAV file path is emitted as the result immediately without calling the transcription engine. |
+| DR-155 | If the transcription engine raises an error, an error signal is emitted. |
+| DR-156 | If transcription completes normally without cancellation, the path of the produced transcript is emitted as the result. |
+| DR-157 | If cancellation was requested during processing, a cancellation signal is emitted, carrying the folder path if a partial transcript was saved. |
 ---
 
 #### `_transcribe_wav_file(wav_path, language, enable_diarization) -> None` *(background thread)*
 
 Same pipeline as `_process_recording` but for a user-selected WAV file.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-158 | If the transcription engine raises an error, an error signal is emitted. |
+| DR-159 | If cancellation was requested during processing, a cancellation signal is emitted, carrying the folder path if a partial transcript was saved. |
+| DR-160 | If transcription completes normally without cancellation, the finished signal is emitted with the transcript path. |
 ### 8.6 Methods — UI State
 
-| Method | Description |
+---
+
+#### `_update_controls() -> None`
+
+Enables/disables all controls based on current state flags.
+
+**Detailed requirements**:
+
+| ID | Requirement |
 |---|---|
-| `_update_controls()` | Enables/disables all controls based on current state flags |
-| `_on_source_toggled()` | Updates Start button and combo enabled states when a source checkbox changes |
-| `_sources_enabled() -> bool` | Returns `True` if at least one source checkbox is checked |
-| `_update_duration()` | Called every 1 s; updates the duration label during recording |
-| `_update_levels()` | Called every 80 ms; reads `recorder.get_levels()` and updates progress bars |
+| DR-161 | If the Whisper model is not ready, the transcription checkbox is forced off and disabled, and the language selector is disabled. |
+| DR-162 | If the Whisper model is ready, the transcription checkbox and language selector are enabled. |
+| DR-163 | Diarization is enabled only when both models are ready and transcription is active; otherwise the diarization checkbox is forced off and disabled. |
+| DR-164 | The "Install Whisper" button is shown only when the model is not ready and no loading or installation is in progress. |
+| DR-165 | The "Install Pyannote" button is shown only when Whisper is ready, pyannote is not ready, and no loading or installation is in progress. |
+| DR-166 | The "Transcribe WAV" button is enabled only when Whisper is ready, no recording is active, and no processing is running. |
+| DR-167 | Source checkboxes and device selectors are locked while recording or processing is active. |
+---
+
+#### `_on_source_toggled() -> None`
+
+Updates Start button and combo enabled states when a source checkbox changes.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-168 | If at least one source checkbox is checked and the app is idle, the Start button is enabled; otherwise it is disabled. |
+| DR-169 | The microphone device selector is enabled only when the microphone checkbox is checked and the app is idle. |
+| DR-170 | The speaker device selector is enabled only when the speaker checkbox is checked and the app is idle. |
+---
+
+#### `_sources_enabled() -> bool`
+
+Returns `True` if at least one source checkbox is checked.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-171 | If at least one of the microphone or speaker checkboxes is checked, returns `True`. |
+| DR-172 | If both are unchecked, returns `False`. |
+---
+
+#### `_update_duration() -> None`
+
+Called every 1 s; updates the duration label during recording.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-173 | If a recording is active and a start time was recorded, the elapsed duration is computed and the display is updated. |
+| DR-174 | If no recording is active, or the start time is unavailable, no update is performed. |
+---
+
+#### `_update_levels() -> None`
+
+Called every 80 ms; reads `recorder.get_levels()` and updates progress bars.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-175 | single path — audio levels are read from the recorder and the two level bars are updated unconditionally. |
 
 ### 8.7 Methods — Slots
 
-| Method | Emitting signal | Description |
-|---|---|---|
-| `_on_whisper_ready(bool)` | `whisper_ready` | Sets `self.whisper_ready`, calls `_update_controls` |
-| `_on_pyannote_ready(bool)` | `pyannote_ready` | Sets `self.pyannote_ready`, calls `_update_controls` |
-| `_on_initial_load_complete()` | `initial_load_complete` | Hides progress bar, enables Start |
-| `_on_whisper_setup_requested()` | `whisper_setup_requested` | Shows QMessageBox; sets `_whisper_setup_result` and releases `_whisper_setup_event` |
-| `_on_pyannote_setup_requested()` | `pyannote_setup_requested` | Opens `PyannoteSetupDialog`; sets `_pyannote_setup_result` and releases `_pyannote_setup_event` |
-| `_on_messagebox_requested(kind, title, msg)` | `messagebox_requested` | Shows a modal dialog of the requested type |
-| `_on_transcription_finished(folder, file)` | `finished` | Resets processing state; shows completion dialog with **Open Folder** and **Ok** buttons; if Open Folder is clicked calls `os.startfile(folder)` (F-35) |
-| `_on_cancelled(folder)` | `cancelled` | Resets processing state; shows cancellation message |
-| `_on_transcription_error(msg)` | `error` | Resets processing state; shows error dialog |
-| `_on_cancel_clicked()` | — | Sets `_cancel_event`; disables Cancel button |
-| `_on_mute_mic_clicked()` | — | Calls `recorder.mute_mic`; updates button label |
-| `_on_transcribe_toggled(bool)` | — | Calls `_update_controls` |
+---
+
+#### `_on_whisper_ready(success: bool) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-176 | If `success` is `True`, the Whisper model is marked as ready and the controls are updated. |
+| DR-177 | If `success` is `False`, the Whisper model is marked as unavailable and the controls are updated. |
+---
+
+#### `_on_pyannote_ready(success: bool) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-178 | If `success` is `True`, pyannote is marked as ready and the controls are updated. |
+| DR-179 | If `success` is `False`, pyannote is marked as unavailable and the controls are updated. |
+---
+
+#### `_on_initial_load_complete() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-180 | If Whisper is ready, the transcription checkbox is restored to its previously saved value. |
+| DR-181 | If Whisper is not ready, the transcription checkbox is left as disabled. |
+| DR-182 | If both Whisper and pyannote are ready, the diarization checkbox is restored to its saved value. |
+| DR-183 | If either model is not ready, the diarization checkbox is left as disabled. |
+---
+
+#### `_on_whisper_setup_requested() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-184 | If the user confirms the download, the background loading thread is unblocked with a positive result. |
+| DR-185 | If the user declines or closes the dialog, the background thread is unblocked with a negative result. |
+---
+
+#### `_on_pyannote_setup_requested() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-186 | If the setup dialog is accepted (token entered and download completed), the background thread is unblocked with a positive result. |
+| DR-187 | If the dialog is rejected or closed, the background thread is unblocked with a negative result. |
+| DR-188 | If the dialog raises an exception during construction or execution, the error is logged and the background thread is unblocked with a negative result regardless. |
+---
+
+#### `_on_messagebox_requested(kind: str, title: str, message: str) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-189 | If `kind` is `"critical"`, a critical error dialog is shown. |
+| DR-190 | If `kind` is `"warning"`, a warning dialog is shown. |
+| DR-191 | For any other value of `kind`, an informational dialog is shown. |
+---
+
+#### `_on_transcription_finished(folder: str, file: str) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-192 | If the user clicks "Open Folder", the output directory is opened in the system file explorer. |
+| DR-193 | If the user clicks "Ok" or closes the dialog, no additional action is taken. |
+---
+
+#### `_on_cancel_clicked() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-194 | single path — the cancellation flag is set, the Cancel button is disabled, and the status label is updated. |
+
+---
+
+#### `_on_cancelled(folder: str) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-195 | If a folder path is provided, the status indicates that a partial transcript was saved. |
+| DR-196 | If the folder path is empty, the status indicates a plain cancellation with no output. |
+---
+
+#### `_on_transcription_error(message: str) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-197 | single path — the processing state is reset and an error dialog is shown with the error message. |
+
+---
+
+#### `_on_mute_mic_clicked() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-198 | When the button is toggled on (mute), microphone muting is activated and the button label changes to "Unmute Mic". |
+| DR-199 | When the button is toggled off (unmute), microphone muting is deactivated and the button label reverts to "Mute Mic". |
+---
+
+#### `_on_transcribe_toggled(checked: bool) -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-200 | single path — control states are updated regardless of whether the checkbox is checked or unchecked. |
+
+---
+
+#### `_on_install_whisper_clicked() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-201 | single path — the installation process is marked as in progress, the UI reflects this, and the install task runs in the background. |
+
+---
+
+#### `_run_whisper_install() -> None` *(background thread)*
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-202 | If the user declines the download prompt, the installation is cancelled and Whisper is marked as unavailable. |
+| DR-203 | If the user confirms and loading succeeds, Whisper is marked as ready. |
+| DR-204 | If the user confirms but loading fails, an error dialog is shown and Whisper is marked as unavailable. |
+---
+
+#### `_on_install_pyannote_clicked() -> None`
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-205 | single path — the installation is marked as in progress, the UI reflects this, and the install task runs in the background. |
+
+---
+
+#### `_run_pyannote_install() -> None` *(background thread)*
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-206 | single path — delegates entirely to the pyannote initialisation flow and emits the result. |
 
 ### 8.8 Methods — Settings & Lifecycle
 
@@ -650,11 +1180,23 @@ Same pipeline as `_process_recording` but for a user-selected WAV file.
 
 Serialises current checkbox states, language, and device selections to `settings.json`. Called from `closeEvent`. Errors are logged but do not prevent closure.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-207 | If the settings file is written successfully, the function returns normally. |
+| DR-208 | If writing fails for any reason, a warning is logged and the function returns without raising, allowing the application to close cleanly. |
 ---
 
 #### `_apply_settings(s: dict) -> None`
 
 Applies a settings dict to all relevant widgets using `_combo_set_data` for combo boxes.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-209 | single path — each widget is set from the supplied dict. If a stored device or language value is no longer available in its combo box, that item is left at its current selection. |
 
 ---
 
@@ -662,6 +1204,13 @@ Applies a settings dict to all relevant widgets using `_combo_set_data` for comb
 
 Calls `_save_settings`, stops any active recording, then accepts the event.
 
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-210 | If a recording is in progress when the window is closed, it is stopped before the window closes. |
+| DR-211 | If no recording is active, no stop operation is attempted. |
+| DR-212 | Regardless of whether saving settings or stopping the recording raises an exception, the window always closes. |
 ---
 
 ## 9. Architecture Traceability
@@ -899,3 +1448,174 @@ This section provides full, function-level traceability from every element of `A
 | Write transcript file(s) | `TranscriptionEngine._save_transcript()` / `_save_diarized_transcript()` §6.2 |
 | Emit `finished` | `MainWindow._transcribe_wav_file()` §8.5 → `Signals.finished` §2.1 |
 | Handle `finished` — show dialog with Open Folder (F-35) | `MainWindow._on_transcription_finished()` §8.7 |
+
+#### ARCH §3.6 — Settings & Preferences Lifecycle
+
+| Sequence step | Implementing Method |
+|---|---|
+| `_load_config()` at startup | Module-level `_load_config()` §1.3 |
+| `_load_settings()` at startup | Module-level `_load_settings()` §1.3 |
+| `_apply_settings(s)` — populate UI | `MainWindow._apply_settings()` §8.8 |
+| Combo box item selection from stored value | `_combo_set_data()` §1.3 |
+| `closeEvent()` triggers save | `MainWindow.closeEvent()` §8.8 |
+| `_save_settings()` on close | `MainWindow._save_settings()` §8.8 |
+
+#### ARCH §3.7 — Manual Model Re-installation
+
+| Sequence step | Implementing Method |
+|---|---|
+| Click “Install Whisper” | `MainWindow._on_install_whisper_clicked()` §8.7 |
+| Mark installing, update controls | `MainWindow._update_controls()` §8.6 |
+| `_run_whisper_install` background thread | `MainWindow._run_whisper_install()` §8.7 |
+| `is_installed()` + prompt if missing | `WhisperManager.is_installed()` §3.2 → `MainWindow._on_whisper_setup_requested()` §8.7 |
+| `load()` — CUDA → CPU | `WhisperManager.load()` §3.2 |
+| Emit `whisper_ready` | `_run_whisper_install()` §8.7 → `Signals.whisper_ready` §2.1 |
+| Click “Install Pyannote” | `MainWindow._on_install_pyannote_clicked()` §8.7 |
+| `_run_pyannote_install` background thread | `MainWindow._run_pyannote_install()` §8.7 |
+| Delegate to `_initialize_pyannote()` | `MainWindow._initialize_pyannote()` §8.4 |
+| Emit `pyannote_ready` | `_run_pyannote_install()` §8.7 → `Signals.pyannote_ready` §2.1 |
+
+This section provides backward traceability from each detailed requirement (DR-xxx) to the SRS high-level requirement(s) it implements, and to the architecture section that governs its design. The forward direction (SRS → Architecture → DR) is recorded in ARCHITECTURE.md §5.
+
+The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** column references sections of ARCHITECTURE.md.
+
+---
+
+### 10.1 Module-Level Functions
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-001–DR-003 | _load_config() | F-33 | §3.6, §4.4 |
+| DR-004–DR-006 | _load_settings() | F-32 | §3.6, §4.4 |
+| DR-007–DR-008 | _combo_set_data() | F-32 | §3.6, §4.4 |
+| DR-009–DR-014 | format_timestamp() | F-22, F-23 | §3.3 |
+| DR-015–DR-016 | _get_audio_devices() | F-04, F-05, NF-07, NF-08 | §3.2 |
+
+---
+
+### 10.2 WhisperManager
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-017–DR-018 | is_installed() | F-26 | §3.1 |
+| DR-019–DR-023 | load() | F-26, NF-01, NF-03, NF-04, NF-05 | §3.1, §4.5 |
+| DR-024–DR-028 | 	ranscribe() | F-10, F-12, F-14, F-15 | §3.3, §3.5 |
+
+---
+
+### 10.3 PyannoteManager
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-029–DR-032 | __init__() | F-34, NF-09 | §3.4 |
+| DR-033–DR-035 | is_installed() | F-27 | §3.1 |
+| DR-036–DR-039 | 	oken_exists() | F-27, F-29, F-34, NF-09 | §3.4 |
+| DR-040–DR-043 | load_token() | F-28, F-34, NF-09 | §3.4 |
+| DR-044–DR-046 | save_token() | F-34, NF-09, NF-10 | §3.4 |
+| DR-047–DR-050 | delete_token() | F-30, F-34 | §3.4 |
+| DR-051–DR-055 | download_models() | F-27, F-28, F-29, F-30 | §3.1, §3.4 |
+| DR-056–DR-057 | get_pipeline() | F-17, NF-01 | §3.3, §4.5 |
+| DR-058–DR-060 | _initialize_pipeline() | F-17, NF-03, NF-04 | §3.1 |
+
+---
+
+### 10.4 AudioRecorder
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-061–DR-064 | start() | F-01, F-02, F-03 | §3.2 |
+| DR-065–DR-068 | stop() | F-01, F-02 | §3.2 |
+| DR-069–DR-070 | mute_mic() | F-06 | §3.2 |
+| DR-071–DR-078 | save_wav() | F-03, F-24, NF-07, NF-08 | §3.3 |
+| DR-079–DR-083 | get_levels() | F-07, NF-02 | §3.2 |
+| DR-084–DR-087 | _record_speaker() | F-02, F-05, C-01, NF-07, NF-08 | §3.2 |
+| DR-088–DR-092 | _record_microphone() | F-01, F-04, F-06, NF-07, NF-08 | §3.2 |
+| DR-093–DR-097 | _mix() | F-01, F-02 | §3.3 |
+
+---
+
+### 10.5 TranscriptionEngine
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-098–DR-102 | process() | F-10, F-14, F-15, F-17, F-22, F-23 | §3.3, §3.5 |
+| DR-103–DR-105 | _save_transcript() | F-22, F-25 | §3.3 |
+| DR-106–DR-109 | _run_diarization() | F-17, NF-03 | §3.3 |
+| DR-110–DR-112 | _save_diarized_transcript() | F-23, F-25 | §3.3 |
+| DR-113–DR-114 | _unique_path() | F-25 | §3.3 |
+| DR-115–DR-118 | _find_best_speaker() | F-20 | §3.3 |
+| DR-119–DR-127 | _assign_speakers_to_words() | F-17, F-20 | §3.3 |
+
+---
+
+### 10.6 PyannoteSetupDialog
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-128–DR-130 | _on_download_clicked() | F-28, F-29, F-30, C-04 | §3.1, §3.4 |
+
+---
+
+### 10.7 MainWindow — Model Loading
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-131–DR-136 | _load_models() | F-17, F-19, F-26, NF-05 | §3.1 |
+| DR-137–DR-145 | _initialize_pyannote() | F-27, F-28, F-29, F-30, F-31 | §3.1, §3.4 |
+| DR-146–DR-147 | _load_pyannote_pipeline() | F-17, NF-05 | §3.1 |
+
+---
+
+### 10.8 MainWindow — Recording
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-148–DR-151 | _start_recording() | F-01, F-02, F-03, F-07 | §3.2 |
+| DR-152 | _stop_recording() | F-10, F-21 | §3.2, §3.3 |
+| DR-153–DR-157 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, NF-07, NF-08 | §3.3 |
+| DR-158–DR-160 | _transcribe_wav_file() | F-14, F-15, F-16, NF-05, NF-08 | §3.5 |
+
+---
+
+### 10.9 MainWindow — UI State
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-161–DR-167 | _update_controls() | F-11, F-16, F-18, F-19, F-31, NF-12 | §4.6 |
+| DR-168–DR-170 | _on_source_toggled() | F-04, F-05, F-09, NF-12 | §4.6 |
+| DR-171–DR-172 | _sources_enabled() | F-09 | §4.6 |
+| DR-173–DR-174 | _update_duration() | F-08 | §3.2 |
+| DR-175 | _update_levels() | F-07, NF-02 | §3.2 |
+
+---
+
+### 10.10 MainWindow — Slots
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-176–DR-177 | _on_whisper_ready() | F-26, NF-12 | §3.1 |
+| DR-178–DR-179 | _on_pyannote_ready() | F-17, NF-12 | §3.1 |
+| DR-180–DR-183 | _on_initial_load_complete() | F-11, F-18, F-32, NF-12 | §3.1, §3.6, §4.4, §4.6 |
+| DR-184–DR-185 | _on_whisper_setup_requested() | F-26 | §3.1 |
+| DR-186–DR-188 | _on_pyannote_setup_requested() | F-28, NF-05 | §3.1, §3.4 |
+| DR-189–DR-191 | _on_messagebox_requested() | NF-08 | §4.1 |
+| DR-192–DR-193 | _on_transcription_finished() | F-35 | §3.3, §3.5 |
+| DR-194 | _on_cancel_clicked() | F-14 | §3.3 |
+| DR-195–DR-196 | _on_cancelled() | F-14, F-15 | §3.3 |
+| DR-197 | _on_transcription_error() | NF-05, NF-08 | §3.3 |
+| DR-198–DR-199 | _on_mute_mic_clicked() | F-06 | §3.2 |
+| DR-200 | _on_transcribe_toggled() | F-11, NF-12 | §4.6 |
+| DR-201 | _on_install_whisper_clicked() | F-31, NF-12 | §3.1, §3.7, §4.6 |
+| DR-202–DR-204 | _run_whisper_install() | F-26, F-31, NF-05 | §3.1, §3.7 |
+| DR-205 | _on_install_pyannote_clicked() | F-31, NF-12 | §3.1, §3.7, §4.6 |
+| DR-206 | _run_pyannote_install() | F-27, F-28, F-31 | §3.1, §3.7 |
+
+---
+
+### 10.11 MainWindow — Settings & Lifecycle
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-207–DR-208 | _save_settings() | F-32, NF-05 | §3.6, §4.4 |
+| DR-209 | _apply_settings() | F-32 | §3.6, §4.4 |
+| DR-210–DR-212 | closeEvent() | F-01, F-02, NF-05 | §3.2, §4.2 |
