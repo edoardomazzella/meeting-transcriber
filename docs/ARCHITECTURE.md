@@ -509,7 +509,7 @@ The **Architecture Ref** column contains section numbers within *this document*:
 
 | Req ID | Summary | Component(s) | Architecture Ref | Detailed Requirements (DR) |
 |---|---|---|---|---|
-| NF-01 | GUI appears within 2 seconds of launch | MainWindow, all AI components (lazy imports) | §4.5 | DR-019, DR-056 |
+| NF-01 | GUI appears within 2 seconds of launch | MainWindow, all AI components (lazy imports) | §4.5 | — (lazy imports + background thread; no DR) |
 | NF-02 | Level indicators update ≤ 100 ms | MainWindow (80 ms timer), AudioRecorder | §3.2 | DR-082, DR-175 |
 | NF-03 | GPU acceleration where available | ASREngine, DiarizationEngine | §3.1 | DR-020, DR-059, DR-109 |
 | NF-04 | Automatic CPU fallback if no GPU | ASREngine | §3.1 | DR-021, DR-022, DR-060 |

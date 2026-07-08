@@ -1498,7 +1498,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR range | Implementing Method | SRS IDs | Architecture Ref |
 |---|---|---|---|
 | DR-017–DR-018 | is_installed() | F-26 | §3.1 |
-| DR-019–DR-023 | load() | F-26, NF-01, NF-03, NF-04, NF-05 | §3.1, §4.5 |
+| DR-019–DR-023 | load() | F-26, NF-03, NF-04, NF-05 | §3.1, §4.5 |
 | DR-024–DR-028 | 	ranscribe() | F-10, F-12, F-14, F-15 | §3.3, §3.5 |
 
 ---

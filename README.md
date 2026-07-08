@@ -148,8 +148,8 @@ docs/
 tests/
     conftest.py            #   Setup sessione pytest (patch pre-import, fixture Qt e filesystem)
     test_module_functions.py  # DR-001–016
-    test_whisper_manager.py   # DR-017–028  (da completare)
-    test_pyannote_manager.py  # DR-029–060  (da completare)
+    test_whisper_manager.py   # DR-017–028
+    test_pyannote_manager.py  # DR-029–060
     test_audio_recorder.py    # DR-061–097  (da completare)
     test_transcription_engine.py  # DR-098–127  (da completare)
     test_pyannote_setup_dialog.py # DR-128–130  (da completare)
