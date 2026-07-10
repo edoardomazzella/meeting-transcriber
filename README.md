@@ -1,72 +1,72 @@
 # Meeting Transcriber v1.0.0
 
-Desktop app per la trascrizione automatica di riunioni con identificazione degli speaker.
+Desktop application for automatic meeting transcription with speaker identification.
 
-## Funzionalità
+## Features
 
-- Registrazione audio da microfono e/o speaker (loopback)
-- Trascrizione automatica con [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
-- Identificazione degli speaker (diarizzazione) con [pyannote.audio](https://github.com/pyannote/pyannote-audio)
-- Supporto GPU (CUDA) con fallback automatico a CPU
-- Selezione dispositivo audio (microfono e speaker)
-- Mute microfono durante la registrazione senza interromperla
-- Trascrizione di file WAV esistenti
-- Apertura rapida della cartella di output al termine dell'elaborazione
-- Preferenze UI ripristinate automaticamente all'avvio
-- Una sola istanza attiva alla volta
-- Log giornalieri in `logs/`
+- Audio recording from microphone and/or speaker (loopback)
+- Automatic transcription with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+- Speaker identification (diarization) with [pyannote.audio](https://github.com/pyannote/pyannote-audio)
+- GPU (CUDA) support with automatic CPU fallback
+- Audio device selection (microphone and speaker)
+- Mute microphone during recording without stopping it
+- Transcription of existing WAV files
+- Quick output folder access when processing is complete
+- UI preferences automatically restored on startup
+- Single instance enforcement
+- Daily logs in `logs/`
 
-## Requisiti di sistema
+## System Requirements
 
 - Windows 10/11
-- Python 3.10 o superiore → [python.org](https://www.python.org/downloads/)
-- *(opzionale)* GPU NVIDIA con CUDA 12.x per accelerazione
+- Python 3.10 or higher → [python.org](https://www.python.org/downloads/)
+- *(optional)* NVIDIA GPU with CUDA 12.x for acceleration
 
-## Installazione
+## Installation
 
-1. Scarica e installa Python da [python.org](https://www.python.org/downloads/)  
-   ⚠️ Spunta **"Add Python to PATH"** durante l'installazione
+1. Download and install Python from [python.org](https://www.python.org/downloads/)  
+   ⚠️ Check **"Add Python to PATH"** during installation
 
-2. Doppio click su **`install.bat`**  
-   - Scegli **1** se hai una GPU NVIDIA
-   - Scegli **2** per usare solo la CPU
+2. Double-click **`install.bat`**  
+   - Choose **1** if you have an NVIDIA GPU
+   - Choose **2** to use CPU only
 
-3. Attendi il completamento (il download può richiedere diversi minuti)
+3. Wait for the setup to complete (download may take several minutes)
 
-## Avvio
+## Launch
 
-Doppio click su **`run.bat`**
+Double-click **`run.bat`**
 
 ---
 
-## Utilizzo
+## Usage
 
-### Registrazione e trascrizione
+### Recording and transcription
 
-1. Seleziona le sorgenti audio da registrare (**Microfono**, **Speaker**, o entrambe)
-2. Seleziona i dispositivi specifici dagli elenchi a discesa, se necessario
-3. Scegli la lingua oppure lascia **Auto** per il rilevamento automatico
-4. Attiva **Trascrizione** e/o **Diarizzazione** secondo necessità  
-   > La diarizzazione richiede che la trascrizione sia abilitata
-5. Clicca **Avvia Registrazione**
-6. Durante la registrazione puoi:
-   - Monitorare i livelli audio in tempo reale
-   - Silenziare il microfono con il pulsante **Mute Mic** senza interrompere la registrazione
-7. Clicca **Ferma Registrazione**
-8. Attendi il completamento dell'elaborazione (la barra di avanzamento indica lo stato)
-9. Al termine appare un popup con il percorso del file: clicca **Apri Cartella** per aprire direttamente la cartella di output, oppure **Ok** per chiudere
+1. Select the audio sources to record (**Microphone**, **Speaker**, or both)
+2. Select specific devices from the drop-down lists if needed
+3. Choose a language or leave **Auto** for automatic detection
+4. Enable **Transcription** and/or **Diarization** as needed  
+   > Diarization requires transcription to be enabled
+5. Click **Start Recording**
+6. While recording you can:
+   - Monitor audio levels in real time
+   - Mute the microphone with the **Mute Mic** button without stopping the recording
+7. Click **Stop Recording**
+8. Wait for processing to complete (the progress bar shows the current state)
+9. When done, a popup shows the file path: click **Open Folder** to open the output folder directly, or **Ok** to dismiss
 
-### Trascrizione di un file esistente
+### Transcribing an existing file
 
-Usa il pulsante dedicato per selezionare un file WAV già registrato. Il risultato viene salvato in una nuova sottocartella di `recordings/`.
+Use the dedicated button to select an already-recorded WAV file. The result is saved in a new subfolder under `recordings/`.
 
-### Annullamento
+### Cancellation
 
-Durante la trascrizione è possibile cliccare **Annulla**: la trascrizione parziale dei segmenti già elaborati viene comunque salvata.
+During transcription you can click **Cancel**: the partial transcript of segments already processed is still saved.
 
-## Configurazione
+## Configuration
 
-Al primo avvio viene creato il file `config.json`:
+On first launch, `config.json` is created:
 
 ```json
 {
@@ -78,143 +78,143 @@ Al primo avvio viene creato il file `config.json`:
     "cpu_threads": 4,
     "compute_type_gpu": "int8_float16",
     "chunk_length": 30,
-    "pyannote_batch_size": 32
+    "pyannote_batch_size": 16
 }
 ```
 
-| Parametro | Default | Descrizione |
+| Parameter | Default | Description |
 |---|---|---|
-| `cuda_bin_dir` | `"C:\\...\\CUDA\\v12.9\\bin"` | Percorso alla cartella `bin` di CUDA. Lascia vuoto (`""`) se CUDA è già nel PATH |
-| `model_size` | `"medium"` | Dimensione modello Whisper: `tiny`, `base`, `small`, `medium`, `large-v3` |
-| `beam_size` | `5` | Qualità trascrizione (1 = greedy/velocissimo, 5 = accurato). Ha il maggior impatto sulla velocità |
-| `vad` | `true` | Voice Activity Detection: filtra i segmenti non-parlato prima della trascrizione. Disabilita per trascrivere musica/canzoni |
-| `num_workers` | `4` | Worker paralleli per il preprocessing audio. Aumentare riduce il tempo di attesa della GPU |
-| `cpu_threads` | `4` | Thread CPU per le operazioni CTranslate2 |
-| `compute_type_gpu` | `"int8_float16"` | Precisione numerica su GPU. Opzioni: `float16`, `int8_float16` (più veloce), `int8` |
-| `chunk_length` | `30` | Durata in secondi di ogni chunk audio elaborato. Ridurre (es. `15`) per audio con molti speaker brevi |
-| `pyannote_batch_size` | `32` | Segmenti diarizzati in parallelo. Aumentare (es. `64`) se la VRAM lo consente |
+| `cuda_bin_dir` | `"C:\\...\\CUDA\\v12.9\\bin"` | Path to the CUDA `bin` folder. Leave empty (`""`) if CUDA is already in PATH |
+| `model_size` | `"medium"` | Whisper model size: `tiny`, `base`, `small`, `medium`, `large-v3` |
+| `beam_size` | `5` | Transcription quality (1 = greedy/fastest, 5 = accurate). Has the greatest impact on speed |
+| `vad` | `true` | Voice Activity Detection: filters non-speech segments before transcription. Disable to transcribe music/songs |
+| `num_workers` | `4` | Parallel workers for audio preprocessing. Increasing reduces GPU wait time |
+| `cpu_threads` | `4` | CPU threads for CTranslate2 operations |
+| `compute_type_gpu` | `"int8_float16"` | Numeric precision on GPU. Options: `float16`, `int8_float16` (faster), `int8` |
+| `chunk_length` | `30` | Duration in seconds of each processed audio chunk. Reduce (e.g. `15`) for audio with many short speakers |
+| `pyannote_batch_size` | `16` | Segments diarized in parallel. Increase (e.g. `32`) if VRAM allows; decrease to reduce GPU heat |
 
-## Diarizzazione (identificazione speaker)
+## Diarization (speaker identification)
 
-La diarizzazione richiede un token gratuito di [HuggingFace](https://huggingface.co/):
+Diarization requires a free [HuggingFace](https://huggingface.co/) token:
 
-1. Crea un account su [huggingface.co](https://huggingface.co/)
-2. Accetta i termini del modello: [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
-3. Genera un token in [Settings → Access Tokens](https://huggingface.co/settings/tokens)
-4. Inseriscilo nel dialog che appare al primo avvio
+1. Create an account at [huggingface.co](https://huggingface.co/)
+2. Accept the model terms: [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+3. Generate a token at [Settings → Access Tokens](https://huggingface.co/settings/tokens)
+4. Enter it in the dialog that appears on first launch
 
-Il token viene salvato in modo sicuro nel **Windows Credential Manager**.
+The token is stored securely in the **Windows Credential Manager**.
 
-## Versioni CUDA
+## CUDA Versions
 
-Se hai CUDA 11.x invece di 12.x, modifica `requirements-gpu.txt`:
+If you have CUDA 11.x instead of 12.x, edit `requirements-gpu.txt`:
 
 ```
-# Cambia questa riga:
+# Change this line:
 --extra-index-url https://download.pytorch.org/whl/cu121
-# in:
+# to:
 --extra-index-url https://download.pytorch.org/whl/cu118
 ```
 
-Poi riesegui `install.bat`.
+Then run `install.bat` again.
 
 ## Output
 
-Le trascrizioni vengono salvate in `recordings/<timestamp>/`:
+Transcripts are saved in `recordings/<timestamp>/`:
 
-| File | Contenuto |
+| File | Content |
 |---|---|
-| `transcript.txt` | Trascrizione con timestamp |
-| `transcript_diarized.txt` | Trascrizione con timestamp e speaker |
-| `mixed.wav` | Audio registrato (mix microfono + speaker) |
+| `transcript.txt` | Transcription with timestamps |
+| `transcript_diarized.txt` | Transcription with timestamps and speakers |
+| `mixed.wav` | Recorded audio (microphone + speaker mix) |
 
-## Struttura del progetto
+## Project Structure
 
 ```
-meeting_transcription.py   # Applicazione principale
-install.bat                # Installer interattivo
-run.bat                    # Avvio applicazione
-requirements-cpu.txt       # Dipendenze CPU
-requirements-gpu.txt       # Dipendenze GPU (CUDA)
-config.json                # Configurazione (creato al primo avvio)
-pytest.ini                 # Configurazione pytest e marker di test
-logs/                      # Log giornalieri (rotazione giornaliera)
-recordings/                # Trascrizioni e audio per sessione
-models/                    # Modelli AI scaricati
+meeting_transcription.py   # Main application
+install.bat                # Interactive installer
+run.bat                    # Application launcher
+requirements-cpu.txt       # CPU dependencies
+requirements-gpu.txt       # GPU dependencies (CUDA)
+config.json                # Configuration (created on first launch)
+pytest.ini                 # pytest configuration and test markers
+logs/                      # Daily logs (daily rotation)
+recordings/                # Transcripts and audio per session
+models/                    # Downloaded AI models
 docs/
-    REQUIREMENTS.md        #   Specifiche dei requisiti (SRS) — F-xx, NF-xx, C-xx
-    ARCHITECTURE.md        #   Architettura del software
-    COMPONENT_DESIGN.md    #   Design di dettaglio dei componenti — DR-001–212
+    REQUIREMENTS.md        #   Requirements specification (SRS) — F-xx, NF-xx, C-xx
+    ARCHITECTURE.md        #   Software architecture
+    COMPONENT_DESIGN.md    #   Detailed component design — DR-001–212
 tests/
-    conftest.py            #   Setup sessione pytest (patch pre-import, fixture Qt e filesystem)
+    conftest.py            #   pytest session setup (pre-import patches, Qt and filesystem fixtures)
     test_module_functions.py  # DR-001–016
     test_whisper_manager.py   # DR-017–028
     test_pyannote_manager.py  # DR-029–060
-    test_audio_recorder.py    # DR-061–097  (da completare)
-    test_transcription_engine.py  # DR-098–127  (da completare)
-    test_pyannote_setup_dialog.py # DR-128–130  (da completare)
+    test_audio_recorder.py    # DR-061–097  (to be completed)
+    test_transcription_engine.py  # DR-098–127  (to be completed)
+    test_pyannote_setup_dialog.py # DR-128–130  (to be completed)
     test_main_window/
-        conftest.py           #   Fixture MainWindow con dipendenze mockate
-        test_model_loading.py # DR-131–147  (da completare)
-        test_recording.py     # DR-148–160  (da completare)
-        test_ui_state.py      # DR-161–175  (da completare)
-        test_slots.py         # DR-176–206  (da completare)
-        test_settings_lifecycle.py # DR-207–212  (da completare)
+        conftest.py           #   MainWindow fixture with mocked dependencies
+        test_model_loading.py # DR-131–147  (to be completed)
+        test_recording.py     # DR-148–160  (to be completed)
+        test_ui_state.py      # DR-161–175  (to be completed)
+        test_slots.py         # DR-176–206  (to be completed)
+        test_settings_lifecycle.py # DR-207–212  (to be completed)
 ```
 
 ---
 
-## Documentazione tecnica
+## Technical Documentation
 
-Il progetto adotta un modello di documentazione a tre livelli con tracciabilità bidirezionale completa:
+The project follows a three-level documentation model with full bidirectional traceability:
 
-| Documento | Contenuto | Notazione |
+| Document | Content | Notation |
 |---|---|---|
-| `docs/REQUIREMENTS.md` | Requisiti funzionali, non-funzionali e vincoli di sistema | F-xx, NF-xx, C-xx |
-| `docs/ARCHITECTURE.md` | Architettura dei componenti, flussi dinamici e decisioni di design | §n.n |
-| `docs/COMPONENT_DESIGN.md` | Specifica white-box di ogni metodo con requisiti di dettaglio verificabili | DR-001–212 |
+| `docs/REQUIREMENTS.md` | Functional, non-functional, and system constraint requirements | F-xx, NF-xx, C-xx |
+| `docs/ARCHITECTURE.md` | Component architecture, dynamic flows, and design decisions | §n.n |
+| `docs/COMPONENT_DESIGN.md` | White-box specification of each method with verifiable detail requirements | DR-001–212 |
 
-### Come navigare la documentazione
+### How to navigate the documentation
 
-**Tracciabilità in avanti** (dalla specifica all'implementazione):
+**Forward traceability** (from specification to implementation):
 
 `REQUIREMENTS.md (F-xx)` → `ARCHITECTURE.md §5` → `COMPONENT_DESIGN.md (DR-xxx)` → `tests/test_*.py`
 
-`ARCHITECTURE.md §5` è il documento di collegamento centrale: le tabelle §5.1 (funzionali), §5.2 (non-funzionali) e §5.3 (vincoli) riportano per ogni requisito SRS i componenti architetturali coinvolti, la sezione dell'architettura di riferimento e i DR-xxx che lo implementano.
+`ARCHITECTURE.md §5` is the central linking document: tables §5.1 (functional), §5.2 (non-functional), and §5.3 (constraints) list for each SRS requirement the involved architectural components, the reference architecture section, and the DR-xxx that implement it.
 
-**Tracciabilità all'indietro** (dal codice alla specifica):
+**Backward traceability** (from code to specification):
 
 `tests/test_DR_NNN_...` → `COMPONENT_DESIGN.md §10` → `ARCHITECTURE.md §5` → `REQUIREMENTS.md (F-xx)`
 
-`COMPONENT_DESIGN.md §10` è la tabella di lookup inversa: dato un DR-xxx restituisce i requisiti SRS di origine e la sezione dell'architettura di competenza.
+`COMPONENT_DESIGN.md §10` is the reverse lookup table: given a DR-xxx it returns the originating SRS requirements and the relevant architecture section.
 
 ---
 
-## Test
+## Tests
 
-### Installazione dipendenze di test
+### Installing test dependencies
 
 ```bash
 pip install pytest
 ```
 
-Per i test che usano widget Qt (DR-007, DR-008 e successivi) non sono necessarie
-dipendenze aggiuntive su Windows. Su Linux imposta `QT_QPA_PLATFORM=offscreen`
-oppure installa `pytest-qt` che lo gestisce automaticamente.
+For tests that use Qt widgets (DR-007, DR-008 and later) no additional
+dependencies are required on Windows. On Linux set `QT_QPA_PLATFORM=offscreen`
+or install `pytest-qt` which handles it automatically.
 
-### Esecuzione
+### Running tests
 
 ```bash
-# Tutti i test CI-safe (consigliato per sviluppo quotidiano)
+# All CI-safe tests (recommended for daily development)
 pytest -m "not slow and not audio and not requires_gpu"
 
-# Solo i test delle funzioni di modulo (DR-001–016)
+# Only module function tests (DR-001–016)
 pytest tests/test_module_functions.py -v
 
-# Suite completa inclusi test lenti e hardware
+# Full suite including slow and hardware tests
 pytest
 
-# Solo test veloci (esclude Qt, filesystem, slow, audio, GPU)
+# Fast tests only (excludes Qt, filesystem, slow, audio, GPU)
 pytest -m "not qt and not filesystem and not slow and not audio and not requires_gpu"
 ```
 
