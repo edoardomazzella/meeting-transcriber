@@ -40,7 +40,7 @@ _CONFIG_DEFAULTS = {
     "cpu_threads":         4,
     "compute_type_gpu":    "int8_float16",
     "chunk_length":        30,
-    "pyannote_batch_size": 32,
+    "pyannote_batch_size": 16,
 }
 
 def _load_config():
