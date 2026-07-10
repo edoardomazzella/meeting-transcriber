@@ -5,3 +5,10 @@ settings.json
 __pycache__/
 *.pyc
 *.pyo
+.pytest_cache/
+venv/
+.venv/
+.env
+*.egg-info/
+dist/
+build/
