@@ -2,3 +2,6 @@ recordings/
 models/
 logs/
 settings.json
+__pycache__/
+*.pyc
+*.pyo
