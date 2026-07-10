@@ -314,23 +314,23 @@ This flow describes how application parameters (F-33) are loaded once at module 
 ```mermaid
 sequenceDiagram
     participant FS as Filesystem
-    participant App as Startup (module level)
+    participant App as Startup
     participant GUI as MainWindow
 
     Note over App: Executed before MainWindow.__init__
-    App->>FS: _load_config() — reads config.json; creates with defaults if absent
-    FS-->>App: model_size, beam_size, cuda_bin_dir, vad, …  (F-33)
-    App->>FS: _load_settings() — reads settings.json; returns defaults if absent
-    FS-->>App: transcribe, diarization, mic_enabled, language, devices, …
+    App->>FS: _load_config() — reads config.json, creates with defaults if absent
+    FS-->>App: model_size, beam_size, cuda_bin_dir, vad, ... (F-33)
+    App->>FS: _load_settings() — reads settings.json, returns defaults if absent
+    FS-->>App: transcribe, diarization, mic_enabled, language, devices, ...
 
     Note over App,GUI: Inside MainWindow.__init__ — step 6
     App->>GUI: _apply_settings(s) — populate checkboxes, language and device combos
-    Note over GUI: UI reflects the state saved at last close  (F-32)
+    Note over GUI: UI reflects the state saved at last close (F-32)
 
     Note over GUI: On window close
     GUI->>GUI: closeEvent()
-    GUI->>FS: _save_settings() → write settings.json (current checkbox and combo state)
-    Note over FS: Preferences persisted for next launch  (F-32)
+    GUI->>FS: _save_settings() — write settings.json with current checkbox and combo state
+    Note over FS: Preferences persisted for next launch (F-32)
 ```
 
 ### 3.7 Manual Model Re-installation
