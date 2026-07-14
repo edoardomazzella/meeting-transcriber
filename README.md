@@ -146,20 +146,14 @@ docs/
     ARCHITECTURE.md        #   Software architecture
     COMPONENT_DESIGN.md    #   Detailed component design — DR-001–212
 tests/
-    conftest.py            #   pytest session setup (pre-import patches, Qt and filesystem fixtures)
-    test_module_functions.py  # DR-001–016
-    test_whisper_manager.py   # DR-017–028
-    test_pyannote_manager.py  # DR-029–060
-    test_audio_recorder.py    # DR-061–097  (to be completed)
-    test_transcription_engine.py  # DR-098–127  (to be completed)
-    test_pyannote_setup_dialog.py # DR-128–130  (to be completed)
-    test_main_window/
-        conftest.py           #   MainWindow fixture with mocked dependencies
-        test_model_loading.py # DR-131–147  (to be completed)
-        test_recording.py     # DR-148–160  (to be completed)
-        test_ui_state.py      # DR-161–175  (to be completed)
-        test_slots.py         # DR-176–206  (to be completed)
-        test_settings_lifecycle.py # DR-207–212  (to be completed)
+    conftest.py                  #   pytest session setup (pre-import patches, Qt and filesystem fixtures)
+    test_module_functions.py     # DR-001–016   (16 tests)
+    test_whisper_manager.py      # DR-017–028   (14 tests)
+    test_pyannote_manager.py     # DR-029–060   (33 tests)
+    test_audio_recorder.py       # DR-061–097   (37 tests)
+    test_transcription_engine.py # DR-098–127   (30 tests)
+    test_pyannote_setup_dialog.py # DR-128–130  (3 tests)
+    test_main_window.py          # DR-131–212   (82 tests)
 ```
 
 ---
@@ -192,6 +186,10 @@ The project follows a three-level documentation model with full bidirectional tr
 
 ## Tests
 
+The test suite covers all **212 detailed requirements** (DR-001–212) defined in
+`docs/COMPONENT_DESIGN.md` across **215 test cases**, all CI-safe (no real audio
+hardware, no GPU, no model downloads required).
+
 ### Installing test dependencies
 
 ```bash
@@ -205,14 +203,14 @@ or install `pytest-qt` which handles it automatically.
 ### Running tests
 
 ```bash
-# All CI-safe tests (recommended for daily development)
+# Full suite — 215 tests, completes in ~4 s (recommended)
+pytest
+
+# All CI-safe tests excluding slow/hardware (same result on this project)
 pytest -m "not slow and not audio and not requires_gpu"
 
-# Only module function tests (DR-001–016)
-pytest tests/test_module_functions.py -v
-
-# Full suite including slow and hardware tests
-pytest
+# Single component
+pytest tests/test_audio_recorder.py -v
 
 # Fast tests only (excludes Qt, filesystem, slow, audio, GPU)
 pytest -m "not qt and not filesystem and not slow and not audio and not requires_gpu"
