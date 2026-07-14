@@ -83,7 +83,7 @@ classDiagram
 
 ### 2.2 Component Responsibilities
 
-The **Component Design §** column references the corresponding section in `COMPONENT_DESIGN.md` (abbreviated **CD**).
+The **Component Design §** column references the corresponding section in `DETAILED_DESIGN.md` (abbreviated **CD**).
 
 | Component | Layer | Responsibility | Component Design § |
 |---|---|---|---|

@@ -144,16 +144,17 @@ models/                    # Downloaded AI models
 docs/
     REQUIREMENTS.md        #   Requirements specification (SRS) — F-xx, NF-xx, C-xx
     ARCHITECTURE.md        #   Software architecture
-    COMPONENT_DESIGN.md    #   Detailed component design — DR-001–212
+    DETAILED_DESIGN.md      #   Detailed component design — DR-001–212
 tests/
-    conftest.py                  #   pytest session setup (pre-import patches, Qt and filesystem fixtures)
-    test_module_functions.py     # DR-001–016   (16 tests)
-    test_whisper_manager.py      # DR-017–028   (14 tests)
-    test_pyannote_manager.py     # DR-029–060   (33 tests)
-    test_audio_recorder.py       # DR-061–097   (37 tests)
-    test_transcription_engine.py # DR-098–127   (30 tests)
-    test_pyannote_setup_dialog.py # DR-128–130  (3 tests)
-    test_main_window.py          # DR-131–212   (82 tests)
+    conftest.py                       #   pytest session setup (pre-import patches, Qt and filesystem fixtures)
+    unit/
+        test_module_functions.py      # DR-001–016   (16 tests)
+        test_whisper_manager.py       # DR-017–028   (14 tests)
+        test_pyannote_manager.py      # DR-029–060   (33 tests)
+        test_audio_recorder.py        # DR-061–097   (37 tests)
+        test_transcription_engine.py  # DR-098–127   (30 tests)
+        test_pyannote_setup_dialog.py # DR-128–130   (3 tests)
+        test_main_window.py           # DR-131–212   (82 tests)
 ```
 
 ---
@@ -166,28 +167,28 @@ The project follows a three-level documentation model with full bidirectional tr
 |---|---|---|
 | `docs/REQUIREMENTS.md` | Functional, non-functional, and system constraint requirements | F-xx, NF-xx, C-xx |
 | `docs/ARCHITECTURE.md` | Component architecture, dynamic flows, and design decisions | §n.n |
-| `docs/COMPONENT_DESIGN.md` | White-box specification of each method with verifiable detail requirements | DR-001–212 |
+| `docs/DETAILED_DESIGN.md` | White-box specification of each method with verifiable detail requirements | DR-001–212 |
 
 ### How to navigate the documentation
 
 **Forward traceability** (from specification to implementation):
 
-`REQUIREMENTS.md (F-xx)` → `ARCHITECTURE.md §5` → `COMPONENT_DESIGN.md (DR-xxx)` → `tests/test_*.py`
+`REQUIREMENTS.md (F-xx)` → `ARCHITECTURE.md §5` → `DETAILED_DESIGN.md (DR-xxx)` → `tests/test_*.py`
 
 `ARCHITECTURE.md §5` is the central linking document: tables §5.1 (functional), §5.2 (non-functional), and §5.3 (constraints) list for each SRS requirement the involved architectural components, the reference architecture section, and the DR-xxx that implement it.
 
 **Backward traceability** (from code to specification):
 
-`tests/test_DR_NNN_...` → `COMPONENT_DESIGN.md §10` → `ARCHITECTURE.md §5` → `REQUIREMENTS.md (F-xx)`
+`tests/test_DR_NNN_...` → `DETAILED_DESIGN.md §10` → `ARCHITECTURE.md §5` → `REQUIREMENTS.md (F-xx)`
 
-`COMPONENT_DESIGN.md §10` is the reverse lookup table: given a DR-xxx it returns the originating SRS requirements and the relevant architecture section.
+`DETAILED_DESIGN.md §10` is the reverse lookup table: given a DR-xxx it returns the originating SRS requirements and the relevant architecture section.
 
 ---
 
 ## Tests
 
 The test suite covers all **212 detailed requirements** (DR-001–212) defined in
-`docs/COMPONENT_DESIGN.md` across **215 test cases**, all CI-safe (no real audio
+`docs/DETAILED_DESIGN.md` across **215 test cases**, all CI-safe (no real audio
 hardware, no GPU, no model downloads required).
 
 ### Installing test dependencies
@@ -253,12 +254,12 @@ env:
 ### Tracciabilità requisiti ↔ test
 
 Ogni test è nominato `test_DR_NNN_<slug>` e mappato direttamente a un requisito
-di dettaglio in `docs/COMPONENT_DESIGN.md`. La tracciabilità completa dalla
+di dettaglio in `docs/DETAILED_DESIGN.md`. La tracciabilità completa dalla
 specifica SRS (`docs/REQUIREMENTS.md`) fino al singolo test case è:
 
 ```
 REQUIREMENTS.md (F-xx / NF-xx)
   └─► ARCHITECTURE.md §5 (componente + §architettura + DR-xxx)
-        └─► COMPONENT_DESIGN.md (DR-xxx testo esatto)
+        └─► DETAILED_DESIGN.md (DR-xxx testo esatto)
               └─► tests/test_*.py (test_DR_NNN_...)
 ```

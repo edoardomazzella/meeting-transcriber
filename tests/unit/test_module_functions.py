@@ -36,7 +36,7 @@ All 16 tests are safe for standard CI pipelines:
 
 The @pytest.mark.slow / @pytest.mark.audio / @pytest.mark.requires_gpu markers
 are NOT used here.  They appear in later test files that load AI models or
-exercise real recording hardware (see docs/COMPONENT_DESIGN.md §10 for the
+exercise real recording hardware (see docs/DETAILED_DESIGN.md §10 for the
 full DR-to-file mapping).
 """
 
