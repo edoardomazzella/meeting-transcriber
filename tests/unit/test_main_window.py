@@ -643,6 +643,33 @@ def test_DR_152_stop_recording_resets_state_and_starts_processing(win, monkeypat
     mock_thread.start.assert_called_once()
 
 
+@pytest.mark.qt
+def test_DR_152b_stop_recording_shows_install_whisper_when_missing(win, monkeypatch):
+    """Regression: after Stop, if Whisper is missing, the install button is
+    immediately visible (even while loading/processing may still be active)."""
+    win.recording = True
+    win.start_time = time.monotonic()
+    win.recorder.stop = MagicMock()
+    win.whisper_ready = False
+    win._whisper_loading = True
+    win._whisper_installing = False
+
+    # Prevent background processing thread execution.
+    mock_thread = MagicMock()
+    monkeypatch.setattr(
+        mt, "threading",
+        type("T", (), {
+            "Thread": staticmethod(lambda *a, **kw: mock_thread),
+            "Event": mt.threading.Event,
+        })(),
+    )
+
+    win._stop_recording()
+
+    assert not win.install_whisper_button.isHidden()
+    assert not win.install_whisper_button.isEnabled()
+
+
 # ============================================================================
 # DR-153 to DR-157  _process_recording()
 # ============================================================================
@@ -852,8 +879,8 @@ def test_DR_163_update_controls_diarize_only_when_both_ready(win):
 
 @pytest.mark.qt
 def test_DR_164_update_controls_install_whisper_shown_when_not_ready(win):
-    """DR-164: The 'Install Whisper' button is visible only when Whisper is not
-    ready, not loading, and not currently installing."""
+    """DR-164: The 'Install Whisper' button is visible whenever Whisper is not
+    ready; it is enabled only when idle and not loading/installing."""
     win.whisper_ready = False
     win._whisper_loading = False
     win._whisper_installing = False
@@ -867,8 +894,8 @@ def test_DR_164_update_controls_install_whisper_shown_when_not_ready(win):
 
 @pytest.mark.qt
 def test_DR_165_update_controls_install_pyannote_shown_when_needed(win):
-    """DR-165: The 'Install Pyannote' button is visible only when Whisper is
-    ready, pyannote is not ready, and no loading is in progress."""
+    """DR-165: The 'Install Pyannote' button is visible when Whisper is ready
+    and pyannote is missing; it is enabled only when idle and not loading/installing."""
     win.whisper_ready = True
     win.pyannote_ready = False
     win._pyannote_loading = False

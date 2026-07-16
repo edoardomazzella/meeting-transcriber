@@ -907,7 +907,7 @@ Stops the level timer, hides meters, calls `recorder.stop()`, resets mute state,
 
 | ID | Requirement |
 |---|---|
-| DR-152 | single path — all recording state is unconditionally reset and processing is always launched with the current language, transcription, and diarization settings. |
+| DR-152 | single path — all recording state is unconditionally reset and processing is always launched with the current language, transcription, and diarization settings. During the transition to processing, control visibility is refreshed immediately via `_update_controls()` so install actions are visible as soon as model readiness requires them. |
 
 ---
 
@@ -952,8 +952,8 @@ Enables/disables all controls based on current state flags.
 | DR-161 | If the Whisper model is not ready, the transcription checkbox is forced off and disabled, and the language selector is disabled. |
 | DR-162 | If the Whisper model is ready, the transcription checkbox and language selector are enabled. |
 | DR-163 | Diarization is enabled only when both models are ready and transcription is active; otherwise the diarization checkbox is forced off and disabled. |
-| DR-164 | The "Install Whisper" button is shown only when the model is not ready and no loading or installation is in progress. |
-| DR-165 | The "Install Pyannote" button is shown only when Whisper is ready, pyannote is not ready, and no loading or installation is in progress. |
+| DR-164 | The "Install Whisper" button is visible whenever the model is not ready. It is enabled only when the app is idle (not recording, not processing) and no Whisper loading/installation is in progress. |
+| DR-165 | The "Install Pyannote" button is visible whenever Whisper is ready and pyannote is not ready. It is enabled only when the app is idle (not recording, not processing) and no pyannote loading/installation is in progress. |
 | DR-166 | The "Transcribe WAV" button is enabled only when Whisper is ready, no recording is active, and no processing is running. |
 | DR-167 | Source checkboxes and device selectors are locked while recording or processing is active. |
 ---

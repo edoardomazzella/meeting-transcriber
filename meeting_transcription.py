@@ -5,6 +5,7 @@ __version__ = "1.0.0"
 import sys
 import threading
 import warnings
+import inspect
 from pathlib import Path
 from datetime import datetime
 import time
@@ -254,7 +255,15 @@ class WhisperManager:
             raise RuntimeError(message or f"Unable to load the Whisper model.\n\n{e}")
 
     def transcribe(self, wav, language=None, on_status=None, cancel_event=None):
-        """Transcribe a wav file. Returns a list of segments (may be partial if cancelled)."""
+        """Transcribe a wav file. Returns a list of segments (may be partial if cancelled).
+
+        The segment generator runs on a dedicated producer thread so that
+        cancel_event is polled every ≤100 ms via a queue timeout, making
+        cancellation responsive even when the model is mid-inference on a
+        long audio chunk.
+        """
+        import queue as _queue
+
         if on_status:
             on_status("Transcribing...")
         log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
@@ -263,11 +272,40 @@ class WhisperManager:
         if language:
             args["language"] = language
         segments_gen, _ = self.model.transcribe(**args)
+
+        _DONE = object()
+        _q = _queue.Queue(maxsize=1)
+
+        def _producer():
+            try:
+                for seg in segments_gen:
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    _q.put(seg)
+            except Exception as _exc:
+                _q.put(_exc)
+            finally:
+                _q.put(_DONE)
+
+        _producer_thread = threading.Thread(target=_producer, daemon=True)
+        _producer_thread.start()
+
         result = []
-        for segment in segments_gen:
+        while True:
+            try:
+                item = _q.get(timeout=0.1)
+            except _queue.Empty:
+                if cancel_event and cancel_event.is_set():
+                    break
+                continue
+            if item is _DONE:
+                break
+            if isinstance(item, Exception):
+                raise item
+            result.append(item)
             if cancel_event and cancel_event.is_set():
                 break
-            result.append(segment)
+
         log.info("Transcription %s (%d segments)",
                  "cancelled" if (cancel_event and cancel_event.is_set()) else "completed",
                  len(result))
@@ -565,8 +603,12 @@ class TranscriptionEngine:
             return txt
         if on_status:
             on_status("Running speaker diarization...")
-        speaker_segments = self._run_diarization(wav)
-        if cancel_event and cancel_event.is_set():
+        run_params = inspect.signature(self._run_diarization).parameters
+        if "cancel_event" in run_params:
+            speaker_segments = self._run_diarization(wav, cancel_event=cancel_event)
+        else:
+            speaker_segments = self._run_diarization(wav)
+        if speaker_segments is None or (cancel_event and cancel_event.is_set()):
             return txt
         return self._save_diarized_transcript(segments, speaker_segments, output_dir)
 
@@ -578,7 +620,13 @@ class TranscriptionEngine:
                     f.write(f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n")
         return txt
 
-    def _run_diarization(self, wav, on_status=None):
+    def _run_diarization(self, wav, on_status=None, cancel_event=None):
+        """Run speaker diarization. Returns the Annotation, or None if cancelled.
+
+        The pipeline call runs in a daemon thread; cancel_event is polled
+        every ≤100 ms so the caller is unblocked without waiting for the
+        (potentially multi-minute) pipeline to complete.
+        """
         import torch
         log.info("Diarization started (wav=%s)", wav)
         waveform, sr = sf.read(str(wav), dtype="float32")
@@ -590,12 +638,37 @@ class TranscriptionEngine:
         waveform = torch.from_numpy(waveform).to(device)
         if on_status:
             on_status("Running speaker diarization...")
-        with torch.no_grad():
-            result = self.pyannote.get_pipeline()(
-                {"waveform": waveform, "sample_rate": sr}, batch_size=PYANNOTE_BATCH
-            )
-        speaker_segments = result.exclusive_speaker_diarization
+
+        _result_holder = [None]
+        _error_holder = [None]
+        _done = threading.Event()
+
+        def _run_pipeline():
+            try:
+                with torch.no_grad():
+                    _result_holder[0] = self.pyannote.get_pipeline()(
+                        {"waveform": waveform, "sample_rate": sr}, batch_size=PYANNOTE_BATCH
+                    )
+            except Exception as exc:
+                _error_holder[0] = exc
+            finally:
+                _done.set()
+
+        _t = threading.Thread(target=_run_pipeline, daemon=True)
+        _t.start()
+
+        while not _done.wait(timeout=0.1):
+            if cancel_event and cancel_event.is_set():
+                del waveform
+                log.info("Diarization cancelled — pipeline thread continues as daemon")
+                return None
+
         del waveform
+
+        if _error_holder[0]:
+            raise _error_holder[0]
+
+        speaker_segments = _result_holder[0].exclusive_speaker_diarization
         speakers = {label for _, _, label in speaker_segments.itertracks(yield_label=True)}
         log.info("Diarization completed (%d speakers)", len(speakers))
         return speaker_segments
@@ -1089,6 +1162,7 @@ class MainWindow(QWidget):
             self.transcribe_checkbox.setChecked(self._pending_settings["transcribe"])
         if self.whisper_ready and self.pyannote_ready:
             self.diarization_checkbox.setChecked(self._pending_settings["diarization"])
+        self._update_controls()
 
     def _sources_enabled(self):
         return self.mic_checkbox.isChecked() or self.speaker_checkbox.isChecked()
@@ -1108,19 +1182,23 @@ class MainWindow(QWidget):
         if not can_diarize:
             self.diarization_checkbox.setChecked(False)
         self.diarization_checkbox.setEnabled(can_diarize)
-        whisper_installable = not self.whisper_ready and not self._whisper_loading
+        whisper_installable = not self.whisper_ready
         self.install_whisper_button.setVisible(whisper_installable)
         self.install_whisper_button.setEnabled(
             whisper_installable
             and not self.recording
+            and not self._processing
             and not self._whisper_installing
+            and not self._whisper_loading
         )
-        pyannote_installable = self.whisper_ready and not self.pyannote_ready and not self._pyannote_loading
+        pyannote_installable = self.whisper_ready and not self.pyannote_ready
         self.install_pyannote_button.setVisible(pyannote_installable)
         self.install_pyannote_button.setEnabled(
             pyannote_installable
             and not self.recording
+            and not self._processing
             and not self._pyannote_installing
+            and not self._pyannote_loading
         )
         self.transcribe_wav_button.setEnabled(
             self.whisper_ready
@@ -1268,6 +1346,7 @@ class MainWindow(QWidget):
         self.stop_button.setEnabled(False)
         self.cancel_button.setVisible(True)
         self.cancel_button.setEnabled(True)
+        self._update_controls()
         self.signals.status_changed.emit("Stopping recording...")
         self.progress_bar.setVisible(True)
         language = self.language_combo.currentData()
