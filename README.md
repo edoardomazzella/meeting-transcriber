@@ -217,49 +217,50 @@ pytest tests/test_audio_recorder.py -v
 pytest -m "not qt and not filesystem and not slow and not audio and not requires_gpu"
 ```
 
-### Marker e categorie CI
+### Markers and CI categories
 
-Ogni test è decorato con uno o più marker che ne indicano i requisiti di esecuzione:
+Each test is decorated with one or more markers indicating its execution requirements:
 
-| Marker | Significato | Escludere dalla CI quando |
+| Marker | Meaning | Exclude from CI when |
 |---|---|---|
-| `@pytest.mark.filesystem` | Usa `tmp_path`; nessun hardware richiesto | Mai — sempre CI-safe |
-| `@pytest.mark.qt` | Richiede `QApplication` (widget Qt) | Su Linux headless senza `QT_QPA_PLATFORM=offscreen` |
-| `@pytest.mark.slow` | Scarica o carica modelli AI (centinaia di MB, minuti) | Pipeline CI standard a risposta rapida |
-| `@pytest.mark.audio` | Richiede hardware audio reale (WASAPI/soundcard) | Container CI senza scheda audio fisica |
-| `@pytest.mark.requires_gpu` | Richiede GPU NVIDIA con CUDA | Agenti CI senza GPU dedicata |
+| `@pytest.mark.filesystem` | Uses `tmp_path`; no hardware required | Never — always CI-safe |
+| `@pytest.mark.qt` | Requires `QApplication` (Qt widgets) | On headless Linux without `QT_QPA_PLATFORM=offscreen` |
+| `@pytest.mark.slow` | Downloads or loads AI models (hundreds of MB, minutes) | Standard fast-response CI pipeline |
+| `@pytest.mark.audio` | Requires real audio hardware (WASAPI/soundcard) | CI containers without physical audio card |
+| `@pytest.mark.requires_gpu` | Requires NVIDIA GPU with CUDA | CI agents without a dedicated GPU |
 
-**Perché escludere `slow`, `audio` e `requires_gpu` dalla CI standard:**
+**Why exclude `slow`, `audio`, and `requires_gpu` from the standard CI:**
 
-- **`slow`** — I test che caricano `WhisperManager` o scaricano i modelli pyannote
-  impiegano da 30 secondi a diversi minuti e richiedono accesso a internet. Una
-  pipeline CI deve completarsi in tempi prevedibili (< 2 minuti): questi test
-  appartengono a una pipeline schedulata notturna o a un agente dedicato.
+- **`slow`** — Tests that load `WhisperManager` or download pyannote models take
+  from 30 seconds to several minutes and require internet access. A CI pipeline
+  must complete in predictable time (< 2 minutes): these tests belong to a
+  nightly scheduled pipeline or a dedicated agent.
 
-- **`audio`** — I container CI non espongono hardware audio. Un test che chiama
-  soundcard su un container fallisce per motivi infrastrutturali, non per difetti
-  nel codice: falsi negativi che degradano la fiducia nella suite.
+- **`audio`** — CI containers do not expose audio hardware. A test that calls
+  soundcard on a container fails for infrastructure reasons, not code defects:
+  false negatives that erode trust in the suite.
 
-- **`requires_gpu`** — La maggior parte degli agenti CI usa macchine virtuali
-  senza GPU. I test GPU-dipendenti (percorso CUDA di WhisperManager, pipeline
-  pyannote su GPU) andrebbero su un agente self-hosted con NVIDIA disponibile.
+- **`requires_gpu`** — Most CI agents use virtual machines without a GPU.
+  GPU-dependent tests (WhisperManager CUDA path, pyannote pipeline on GPU)
+  should run on a self-hosted agent with an available NVIDIA card.
 
-I test `@pytest.mark.qt` (DR-007, DR-008 e futuri) sono CI-safe su Windows
-senza configurazione aggiuntiva. Su Linux basta aggiungere al job CI:
+Tests marked `@pytest.mark.qt` (DR-007, DR-008 and later) are CI-safe on
+Windows without additional configuration. On Linux, add the following to the CI
+job:
 ```yaml
 env:
   QT_QPA_PLATFORM: offscreen
 ```
 
-### Tracciabilità requisiti ↔ test
+### Requirements ↔ test traceability
 
-Ogni test è nominato `test_DR_NNN_<slug>` e mappato direttamente a un requisito
-di dettaglio in `docs/DETAILED_DESIGN.md`. La tracciabilità completa dalla
-specifica SRS (`docs/REQUIREMENTS.md`) fino al singolo test case è:
+Each test is named `test_DR_NNN_<slug>` and mapped directly to a detailed
+requirement in `docs/DETAILED_DESIGN.md`. The full traceability chain from the
+SRS specification (`docs/REQUIREMENTS.md`) down to the individual test case is:
 
 ```
 REQUIREMENTS.md (F-xx / NF-xx)
-  └─► ARCHITECTURE.md §5 (componente + §architettura + DR-xxx)
-        └─► DETAILED_DESIGN.md (DR-xxx testo esatto)
+  └─► ARCHITECTURE.md §5 (component + §architecture + DR-xxx)
+        └─► DETAILED_DESIGN.md (DR-xxx exact text)
               └─► tests/test_*.py (test_DR_NNN_...)
 ```
