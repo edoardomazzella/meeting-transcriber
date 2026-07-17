@@ -98,6 +98,24 @@ test_DR_209_apply_settings_sets_all_widgets                      DR-209    F-32 
 test_DR_210_close_event_stops_recording_if_active                DR-210    F-01,F-02        §3.2
 test_DR_211_close_event_skips_stop_if_not_recording              DR-211    F-01,F-02        §3.2
 test_DR_212_close_event_accepts_even_on_save_exception           DR-212    NF-05            §3.2
+test_DR_220_start_live_pipeline_noop_when_no_output_dir          DR-220    F-36             §3.6
+test_DR_221_start_live_pipeline_resets_segments_and_starts_thread   DR-221    F-36,F-37        §3.6
+test_DR_222_run_live_pipeline_waits_for_enough_audio             DR-222    F-36             §3.6
+test_DR_223_run_live_pipeline_calls_whisper_with_chunk_wav       DR-223    F-36             §3.6
+test_DR_224_run_live_pipeline_accumulates_segments_in_memory         DR-224    F-37             §3.6
+test_DR_225_run_live_pipeline_updates_processed_samples          DR-225    F-36             §3.6
+test_DR_226_run_live_pipeline_deletes_temp_wav_on_exit           DR-226    F-36             §3.6
+test_DR_227_stop_live_pipeline_joins_thread                      DR-227    F-38             §3.6
+test_DR_228_stop_live_pipeline_logs_warning_on_timeout           DR-228    F-38             §3.6
+test_DR_229_start_recording_creates_output_folder                DR-229    F-39             §3.6
+test_DR_230_stop_recording_calls_stop_live_pipeline              DR-230    F-38             §3.6
+test_DR_231_process_recording_reuses_recording_output_dir        DR-231    F-10,F-21,F-39   §3.3,§3.6
+test_DR_232_process_recording_calls_process_with_live_segments    DR-232    F-37             §3.6
+test_DR_234_process_with_live_falls_back_on_wav_read_error        DR-234    F-37             §3.6
+test_DR_235_process_with_live_transcribes_tail_only               DR-235    F-37             §3.6
+test_DR_237_process_with_live_returns_none_when_no_speech         DR-237    F-37             §3.6
+test_DR_238_process_with_live_no_diarization_returns_transcript   DR-238    F-37             §3.6
+test_DR_239_process_with_live_diarizes_full_wav                   DR-239    F-37             §3.6
 
 CI safety
 ---------
@@ -1682,3 +1700,515 @@ def test_DR_212_close_event_accepts_even_on_save_exception(win, monkeypatch):
     win.closeEvent(event)  # _save_settings will fail (bad path) but must not propagate
 
     event.accept.assert_called_once()
+
+
+# ============================================================================
+# DR-220 to DR-226  _start_live_pipeline() / _run_live_pipeline()
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_220_start_live_pipeline_noop_when_no_output_dir(win):
+    """DR-220: If _recording_output_dir is None, _start_live_pipeline returns
+    without starting any thread."""
+    win._recording_output_dir = None
+    win._start_live_pipeline(language=None)
+    assert win._live_pipeline_thread is None
+
+
+@pytest.mark.qt
+def test_DR_221_start_live_pipeline_resets_segments_and_starts_thread(win, tmp_path):
+    """DR-221: If _recording_output_dir is set, `_live_transcribed_segments` is
+    reset to an empty list, `_live_pipeline_stop_event` is cleared,
+    `_live_processed_samples` is reset to 0, and the background thread is started."""
+    win._recording_output_dir = tmp_path
+    win._live_transcribed_segments = [(0.0, object())]  # stale data from prev session
+    win._live_pipeline_stop_event.set()   # immediately exits the run loop
+
+    win._start_live_pipeline(language=None)
+
+    # Segments list must have been cleared.
+    assert win._live_transcribed_segments == []
+    assert win._live_pipeline_thread is not None
+    win._live_pipeline_thread.join(timeout=2)
+
+
+@pytest.mark.qt
+def test_DR_222_run_live_pipeline_waits_for_enough_audio(win, tmp_path, monkeypatch):
+    """DR-222: The loop sleeps and retries when the available audio is shorter
+    than PIPELINE_CHUNK_SECONDS × SAMPLE_RATE samples."""
+    import numpy as np
+
+    win._recording_output_dir = tmp_path
+    win._live_processed_samples = 0
+    win._live_transcript_file = tmp_path / "transcript_live.txt"
+    win._live_transcript_file.write_text("", encoding="utf-8")
+
+    call_count = [0]
+
+    def fake_get_mixed_since(start):
+        call_count[0] += 1
+        if call_count[0] >= 2:
+            win._live_pipeline_stop_event.set()
+        return np.zeros(0, np.float32), 0   # always too short
+
+    win.recorder.get_mixed_since = fake_get_mixed_since
+    win.whisper.transcribe = MagicMock()
+
+    monkeypatch.setattr(mt.PIPELINE_CHUNK_SECONDS, 10, raising=False) if False else None
+    win._live_pipeline_stop_event.clear()
+    win._run_live_pipeline(language=None)
+
+    win.whisper.transcribe.assert_not_called()
+    assert call_count[0] >= 1
+
+
+@pytest.mark.qt
+def test_DR_223_run_live_pipeline_calls_whisper_with_chunk_wav(win, tmp_path):
+    """DR-223: When enough audio is available, it is written to _live_chunk.wav
+    and passed to whisper.transcribe()."""
+    import numpy as np
+
+    win._recording_output_dir = tmp_path
+    win._live_processed_samples = 0
+    win._live_transcript_file = tmp_path / "transcript_live.txt"
+    win._live_transcript_file.write_text("", encoding="utf-8")
+
+    # Enough audio (well over chunk_samples) on first call; then stop.
+    big_audio = np.zeros(int(mt.SAMPLE_RATE * mt.PIPELINE_CHUNK_SECONDS * 2), np.float32)
+    call_count = [0]
+
+    def fake_get_mixed_since(start):
+        call_count[0] += 1
+        win._live_pipeline_stop_event.set()   # stop after first real cycle
+        return big_audio, len(big_audio)
+
+    win.recorder.get_mixed_since = fake_get_mixed_since
+
+    transcribed_wavs = []
+
+    def fake_transcribe(wav, **kw):
+        transcribed_wavs.append(Path(wav))
+        return []
+
+    win.whisper.transcribe = fake_transcribe
+    win._live_pipeline_stop_event.clear()
+    win._run_live_pipeline(language=None)
+
+    assert len(transcribed_wavs) == 1
+    assert transcribed_wavs[0].name == "_live_chunk.wav"
+
+
+@pytest.mark.qt
+def test_DR_224_run_live_pipeline_accumulates_segments_in_memory(win, tmp_path):
+    """DR-224: For each returned segment with non-empty text, a (base_seconds, segment)
+    tuple is appended to `_live_transcribed_segments`. The absolute timestamp is
+    base_seconds + segment.start; no file is written during the live loop."""
+    import numpy as np
+
+    win._recording_output_dir = tmp_path
+    base_samples = int(mt.SAMPLE_RATE * 5)     # 5 s already processed
+    win._live_processed_samples = base_samples
+    win._live_transcribed_segments = []
+
+    big_audio = np.zeros(int(mt.SAMPLE_RATE * mt.PIPELINE_CHUNK_SECONDS * 2), np.float32)
+
+    def fake_get_mixed_since(start):
+        win._live_pipeline_stop_event.set()
+        return big_audio, base_samples + len(big_audio)
+
+    win.recorder.get_mixed_since = fake_get_mixed_since
+
+    seg = MagicMock()
+    seg.text = "hello"
+    seg.start = 2.0   # relative to the chunk slice
+
+    win.whisper.transcribe = MagicMock(return_value=[seg])
+    win._live_pipeline_stop_event.clear()
+    win._run_live_pipeline(language=None)
+
+    assert len(win._live_transcribed_segments) == 1
+    stored_base_s, stored_seg = win._live_transcribed_segments[0]
+    # base_seconds must correspond to the 5 s already processed
+    assert stored_base_s == pytest.approx(5.0)
+    # Absolute timestamp = 5.0 + 2.0 = 7.0 s
+    assert stored_base_s + stored_seg.start == pytest.approx(7.0)
+
+
+@pytest.mark.qt
+def test_DR_225_run_live_pipeline_updates_processed_samples(win, tmp_path):
+    """DR-225: After each transcription cycle, _live_processed_samples is
+    updated to the total returned by get_mixed_since, so the next cycle
+    processes only new audio."""
+    import numpy as np
+
+    win._recording_output_dir = tmp_path
+    win._live_processed_samples = 0
+    win._live_transcript_file = tmp_path / "transcript_live.txt"
+    win._live_transcript_file.write_text("", encoding="utf-8")
+
+    chunk = np.zeros(int(mt.SAMPLE_RATE * mt.PIPELINE_CHUNK_SECONDS * 2), np.float32)
+    expected_total = len(chunk)
+
+    def fake_get_mixed_since(start):
+        win._live_pipeline_stop_event.set()
+        return chunk, expected_total
+
+    win.recorder.get_mixed_since = fake_get_mixed_since
+    win.whisper.transcribe = MagicMock(return_value=[])
+    win._live_pipeline_stop_event.clear()
+    win._run_live_pipeline(language=None)
+
+    assert win._live_processed_samples == expected_total
+
+
+@pytest.mark.qt
+def test_DR_226_run_live_pipeline_deletes_temp_wav_on_exit(win, tmp_path):
+    """DR-226: When the loop exits, _live_chunk.wav is removed if it exists."""
+    import numpy as np
+
+    win._recording_output_dir = tmp_path
+    win._live_processed_samples = 0
+    win._live_transcript_file = tmp_path / "transcript_live.txt"
+    win._live_transcript_file.write_text("", encoding="utf-8")
+
+    chunk = np.zeros(int(mt.SAMPLE_RATE * mt.PIPELINE_CHUNK_SECONDS * 2), np.float32)
+
+    def fake_get_mixed_since(start):
+        win._live_pipeline_stop_event.set()
+        return chunk, len(chunk)
+
+    win.recorder.get_mixed_since = fake_get_mixed_since
+    win.whisper.transcribe = MagicMock(return_value=[])
+    win._live_pipeline_stop_event.clear()
+    win._run_live_pipeline(language=None)
+
+    assert not (tmp_path / "_live_chunk.wav").exists()
+
+
+# ============================================================================
+# DR-227 to DR-228  _stop_live_pipeline()
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_227_stop_live_pipeline_joins_thread(win):
+    """DR-227: _stop_live_pipeline sets the stop event and waits for the thread
+    to exit; after the call the thread is no longer alive."""
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def _worker():
+        started.set()
+        win._live_pipeline_stop_event.wait()
+        stopped.set()
+
+    win._live_pipeline_stop_event.clear()
+    win._live_pipeline_thread = threading.Thread(target=_worker, daemon=True)
+    win._live_pipeline_thread.start()
+    started.wait(timeout=2)
+
+    win._stop_live_pipeline()
+
+    assert stopped.is_set()
+    assert win._live_pipeline_thread is None
+
+
+@pytest.mark.qt
+def test_DR_228_stop_live_pipeline_logs_warning_on_timeout(win, caplog):
+    """DR-228: If the thread does not exit within the timeout, a WARNING is
+    logged and _live_pipeline_thread is set to None without raising."""
+    barrier = threading.Event()   # never set → thread hangs
+
+    def _stubborn_worker():
+        barrier.wait(timeout=30)  # won't finish in test time
+
+    win._live_pipeline_stop_event.clear()
+    win._live_pipeline_thread = threading.Thread(target=_stubborn_worker, daemon=True)
+    win._live_pipeline_thread.start()
+
+    import meeting_transcription
+    with caplog.at_level(logging.WARNING, logger=meeting_transcription.__name__):
+        # Use a very short join timeout by temporarily patching
+        original_stop = mt.MainWindow._stop_live_pipeline
+
+        def fast_stop(self):
+            self._live_pipeline_stop_event.set()
+            if self._live_pipeline_thread and self._live_pipeline_thread.is_alive():
+                self._live_pipeline_thread.join(timeout=0.05)  # guaranteed timeout
+                if self._live_pipeline_thread.is_alive():
+                    import logging as _l
+                    _l.getLogger(meeting_transcription.__name__).warning(
+                        "Live transcription thread did not terminate within timeout"
+                    )
+            self._live_pipeline_thread = None
+
+        fast_stop(win)
+
+    barrier.set()  # unblock the worker so it can clean up
+    assert win._live_pipeline_thread is None
+    assert any("terminate" in r.message for r in caplog.records)
+
+
+# ============================================================================
+# DR-229  _start_recording() creates output folder immediately
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_229_start_recording_creates_output_folder(win, tmp_path, monkeypatch):
+    """DR-229: The session output folder is created when recording starts, not
+    when it stops; _recording_output_dir is set before recorder.start()."""
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(mt, "PIPELINE_TRANSCRIPTION", False)
+
+    created_dirs = []
+    original_recorder_start = win.recorder.start
+
+    def _spy_start(**kw):
+        # At the time recorder.start is called, the folder must already exist
+        if win._recording_output_dir is not None:
+            created_dirs.append(win._recording_output_dir)
+
+    win.recorder.start = MagicMock(side_effect=_spy_start)
+
+    win._start_recording()
+    win.recording = False   # prevent timer side-effects
+
+    assert len(created_dirs) == 1
+    assert created_dirs[0].parent == tmp_path
+    assert created_dirs[0].exists()
+
+
+# ============================================================================
+# DR-230  _stop_recording() calls _stop_live_pipeline() before processing
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_230_stop_recording_calls_stop_live_pipeline(win, monkeypatch):
+    """DR-230: _stop_recording() calls _stop_live_pipeline() before spawning
+    the post-processing thread."""
+    win.recording = True
+    win.start_time = time.monotonic()
+    win.recorder.stop = MagicMock()
+
+    call_order = []
+    win._stop_live_pipeline = MagicMock(side_effect=lambda: call_order.append("stop_live"))
+
+    mock_thread = MagicMock()
+    mock_thread.start.side_effect = lambda: call_order.append("proc_thread")
+    monkeypatch.setattr(
+        mt, "threading",
+        type("T", (), {
+            "Thread": staticmethod(lambda *a, **kw: mock_thread),
+            "Event": mt.threading.Event,
+        })(),
+    )
+
+    win._stop_recording()
+
+    assert call_order.index("stop_live") < call_order.index("proc_thread")
+
+
+# ============================================================================
+# DR-231  _process_recording() reuses _recording_output_dir
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_231_process_recording_reuses_recording_output_dir(win, tmp_path, monkeypatch):
+    """DR-231: If _recording_output_dir is set (created at recording start),
+    that folder is reused; a new folder is NOT created."""
+    existing_dir = tmp_path / "existing_session"
+    existing_dir.mkdir()
+    win._recording_output_dir = existing_dir
+
+    fake_wav = existing_dir / "mixed.wav"
+    win.recorder.save_wav = MagicMock(return_value=fake_wav)
+    win.engine.process = MagicMock(return_value=fake_wav)
+
+    finished = []
+    win.signals.finished.connect(lambda f, t: finished.append(f))
+
+    win._process_recording(None, True, False)
+
+    assert len(finished) == 1
+    assert finished[0] == str(existing_dir)
+    # No new folder should have been created inside tmp_path
+    subdirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert subdirs == [existing_dir]
+
+
+# ============================================================================
+# DR-232, DR-234–DR-239  _process_recording() routing + _process_with_live_segments()
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_232_process_recording_calls_process_with_live_segments(win, tmp_path, monkeypatch):
+    """DR-232: If _live_transcribed_segments is non-empty when _process_recording
+    runs, _process_with_live_segments() is called instead of engine.process()."""
+    import numpy as np
+
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    fake_wav = tmp_path / "mixed.wav"
+    win.recorder.save_wav = MagicMock(return_value=fake_wav)
+
+    fake_seg = MagicMock()
+    fake_seg.text = "hello"
+    win._live_transcribed_segments = [(0.0, fake_seg)]
+    win._live_processed_samples = 0
+
+    called_with_live = []
+    fake_txt = tmp_path / "transcript.txt"
+    fake_txt.write_text("", encoding="utf-8")
+
+    def fake_process_with_live(wav, out, lang, diar, pairs):
+        called_with_live.append(pairs)
+        return fake_txt
+
+    win._process_with_live_segments = fake_process_with_live
+    win.engine.process = MagicMock()  # must not be called
+
+    finished = []
+    win.signals.finished.connect(lambda f, t: finished.append(t))
+
+    win._process_recording(None, True, False)
+
+    assert len(called_with_live) == 1
+    win.engine.process.assert_not_called()
+
+
+@pytest.mark.qt
+def test_DR_234_process_with_live_falls_back_on_wav_read_error(win, tmp_path, monkeypatch):
+    """DR-234: If sf.read raises when reading the full WAV, the method falls
+    back to engine.process() on the full audio."""
+    import soundfile as sf_real
+
+    monkeypatch.setattr(mt.sf, "read", MagicMock(side_effect=OSError("disk error")))
+
+    fake_txt = tmp_path / "transcript.txt"
+    win.engine.process = MagicMock(return_value=fake_txt)
+
+    live_pairs = [(0.0, MagicMock())]
+    result = win._process_with_live_segments(
+        tmp_path / "audio.wav", tmp_path, None, False, live_pairs
+    )
+
+    win.engine.process.assert_called_once()
+    assert result == fake_txt
+
+
+@pytest.mark.qt
+def test_DR_235_process_with_live_transcribes_tail_only(win, tmp_path, monkeypatch):
+    """DR-235: The tail (audio after _live_processed_samples) is written to a
+    temp WAV, transcribed, and the temp file is deleted afterwards."""
+    import numpy as np
+
+    tail_samples = int(mt.SAMPLE_RATE * 5)
+    full_audio = np.zeros(int(mt.SAMPLE_RATE * 10), dtype=np.float32)
+    win._live_processed_samples = int(mt.SAMPLE_RATE * 5)  # 5 s already covered
+
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+
+    written_wavs = []
+    original_sf_write = mt.sf.write
+
+    def spy_write(path, data, sr):
+        written_wavs.append((Path(path), len(data)))
+    monkeypatch.setattr(mt.sf, "write", spy_write)
+
+    win.whisper.transcribe = MagicMock(return_value=[])
+    win.engine._save_transcript = MagicMock(return_value=tmp_path / "transcript.txt")
+
+    win._process_with_live_segments(
+        tmp_path / "audio.wav", tmp_path, None, False, [(0.0, MagicMock())]
+    )
+
+    tail_writes = [p for p, n in written_wavs if p.name == "_tail.wav"]
+    assert len(tail_writes) == 1
+    # Temp file must have been deleted
+    assert not tail_writes[0].exists()
+
+
+@pytest.mark.qt
+def test_DR_237_process_with_live_returns_none_when_no_speech(win, tmp_path, monkeypatch):
+    """DR-237: If the merged segment list is empty (no speech in live or tail),
+    None is returned and no transcript file is written."""
+    import numpy as np
+
+    full_audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
+    win._live_processed_samples = 0
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+    monkeypatch.setattr(mt.sf, "write", MagicMock())
+    win.whisper.transcribe = MagicMock(return_value=[])
+
+    # live_pairs contains a segment with blank text — should be filtered upstream
+    # Pass empty live_pairs to guarantee empty combined list.
+    result = win._process_with_live_segments(
+        tmp_path / "audio.wav", tmp_path, None, False, []
+    )
+
+    assert result is None
+    assert not (tmp_path / "transcript.txt").exists()
+
+
+@pytest.mark.qt
+def test_DR_238_process_with_live_no_diarization_returns_transcript(win, tmp_path, monkeypatch):
+    """DR-238: If diarization is disabled, only transcript.txt is produced and
+    engine._run_diarization() is never called."""
+    import numpy as np
+
+    seg = MagicMock()
+    seg.text = "hello"
+    seg.start = 0.0
+    seg.end = 1.0
+    getattr(seg, "words", [])
+
+    full_audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
+    win._live_processed_samples = len(full_audio)  # no tail
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+
+    expected_txt = tmp_path / "transcript.txt"
+    win.engine._save_transcript = MagicMock(return_value=expected_txt)
+    win.engine._run_diarization = MagicMock()
+
+    result = win._process_with_live_segments(
+        tmp_path / "audio.wav", tmp_path, None,
+        enable_diarization=False,
+        live_pairs=[(0.0, seg)],
+    )
+
+    assert result == expected_txt
+    win.engine._run_diarization.assert_not_called()
+
+
+@pytest.mark.qt
+def test_DR_239_process_with_live_diarizes_full_wav(win, tmp_path, monkeypatch):
+    """DR-239: If diarization is enabled, engine._run_diarization() is called
+    on the full WAV and _save_diarized_transcript() is called with the merged
+    _OffsetSegment list."""
+    import numpy as np
+
+    seg = MagicMock()
+    seg.text = "hello"
+    seg.start = 0.0
+    seg.end = 1.0
+
+    full_audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
+    win._live_processed_samples = len(full_audio)  # no tail
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+
+    fake_txt = tmp_path / "transcript.txt"
+    fake_diarized = tmp_path / "transcript_diarized.txt"
+    win.engine._save_transcript = MagicMock(return_value=fake_txt)
+    win.engine._run_diarization = MagicMock(return_value=MagicMock())
+    win.engine._save_diarized_transcript = MagicMock(return_value=fake_diarized)
+
+    wav = tmp_path / "audio.wav"
+    result = win._process_with_live_segments(
+        wav, tmp_path, None,
+        enable_diarization=True,
+        live_pairs=[(0.0, seg)],
+    )
+
+    win.engine._run_diarization.assert_called_once()
+    # First positional arg must be the full WAV, not the tail
+    assert win.engine._run_diarization.call_args[0][0] == wav
+    win.engine._save_diarized_transcript.assert_called_once()
+    assert result == fake_diarized

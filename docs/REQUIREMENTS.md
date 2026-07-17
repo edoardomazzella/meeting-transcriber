@@ -53,6 +53,9 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 | F-14 | The user shall be able to cancel an in-progress transcription |
 | F-15 | A cancelled transcription shall produce a partial transcript for any already-processed audio |
 | F-16 | The user shall be able to transcribe a pre-existing audio file (WAV format) |
+| F-36 | When enabled via configuration, the system shall begin transcribing audio concurrently with an active recording session, without waiting for the session to end |
+| F-37 | Transcribed segments shall be accumulated in memory during the recording session and reused in the final transcript, so that only the audio not yet processed by the live pipeline is submitted to Whisper after recording stops |
+| F-38 | Live transcription shall stop automatically when the user stops the recording, before post-recording processing begins |
 
 ### 3.3 Speaker Identification
 
@@ -73,6 +76,7 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 | F-24 | The recorded audio shall be saved alongside the transcript files |
 | F-25 | Existing output files shall never be overwritten |
 | F-35 | Upon processing completion the user shall be offered the option to open the output folder directly from the notification dialog |
+| F-39 | When live transcription is active, the session output folder shall be created at the moment recording begins so that the live pipeline thread and post-processing use the same output path |
 
 ### 3.5 Model & Token Management
 

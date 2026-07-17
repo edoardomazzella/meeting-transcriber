@@ -87,9 +87,9 @@ The **Component Design §** column references the corresponding section in `DETA
 
 | Component | Layer | Responsibility | Component Design § |
 |---|---|---|---|
-| **MainWindow** | UI | User interaction, control state, background thread orchestration, settings I/O | CD §8 |
+| **MainWindow** | UI | User interaction, control state, background thread orchestration, live pipeline lifecycle, settings I/O | CD §8 |
 | **Signals** | Signal Bus | Typed Qt signals for safe cross-thread UI updates; decouples background threads from UI widgets | CD §2 |
-| **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing, normalisation, WAV export | CD §5 |
+| **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing, normalisation, WAV export; thread-safe incremental audio snapshot (`get_mixed_since`) | CD §5 |
 | **ASREngine** | AI | Whisper model lifecycle (download, load, transcribe); GPU→CPU fallback | CD §3 (`WhisperManager`) |
 | **DiarizationEngine** | AI | pyannote pipeline lifecycle; HuggingFace token management; speaker segmentation | CD §4 (`PyannoteManager`) |
 | **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; speaker-to-word assignment; transcript file generation | CD §6 |
@@ -211,11 +211,12 @@ sequenceDiagram
         ASR-->>TE: segments[] (may be partial if cancelled)
 
         alt Diarization enabled and not cancelled
-            TE->>Dia: get_pipeline()(waveform)
+            TE->>Dia: get_pipeline()(waveform) — runs in daemon thread
+            Note right of Dia: cancel_event polled every ≤100 ms
             Dia-->>TE: speaker_segments
             TE->>TE: assign_speakers_to_words(segments, speaker_segments)
             TE-->>BG: transcript_diarized.txt path
-        else Diarization disabled or cancelled before diarization
+        else Diarization disabled or cancelled before/during diarization
             TE-->>BG: transcript.txt path
         end
 
@@ -227,11 +228,12 @@ sequenceDiagram
         GUI->>User: "Completed" dialog (audio only)
     end
 
-    opt User cancels during transcription
+    opt User cancels during transcription or diarization
         User->>GUI: Click "Cancel"
         GUI->>BG: Set cancel_event
-        BG->>ASR: cancel_event checked after each segment
-        ASR-->>TE: partial segments[]
+        Note right of BG: Transcription — consumer polls queue every ≤100 ms (CD §3.2 DR-213)
+        Note right of BG: Diarization — daemon thread polled every ≤100 ms (CD §6.2 DR-214)
+        ASR-->>TE: partial segments[] (within ≤100 ms of cancel)
         TE-->>BG: partial transcript.txt
         BG-->>GUI: cancelled(folder) signal
         GUI->>GUI: _update_controls() — restore Start, hide Cancel
@@ -307,7 +309,57 @@ sequenceDiagram
     GUI->>User: "Completed" dialog with folder path
 ```
 
-### 3.6 Settings & Preferences Lifecycle
+### 3.6 Live Pipeline Transcription
+
+When `pipeline_transcription` is enabled in `config.json` and Whisper is ready, a live pipeline thread starts at the same time as `AudioRecorder.start()`. It polls the accumulating audio buffer every `PIPELINE_CHUNK_SECONDS` seconds, runs Whisper on each new slice, and **stores the returned segments in memory** alongside their base-time offset. No additional output file is written during recording. When the user clicks Stop, the live thread is joined and post-processing begins using the accumulated segments plus a tail transcription of any remaining audio, producing the standard `transcript.txt` (and optionally `transcript_diarized.txt`) with reduced wait time.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant GUI as MainWindow
+    participant LP as LivePipeline Thread
+    participant Rec as AudioRecorder
+    participant ASR as ASR Engine
+    participant MEM as _live_transcribed_segments
+
+    User->>GUI: Click "Start Recording"
+    GUI->>GUI: Create output folder (YYYYMMDD_HHMMSS/)
+    GUI->>Rec: start()
+    GUI->>LP: Start _run_live_pipeline(language)
+
+    loop every PIPELINE_CHUNK_SECONDS s
+        LP->>Rec: get_mixed_since(_live_processed_samples)
+        Rec-->>LP: (audio_slice, total_samples)
+        alt len(audio_slice) < chunk_samples
+            LP->>LP: sleep 0.7 s, retry
+        else enough audio available
+            LP->>LP: sf.write(_live_chunk.wav)
+            LP->>ASR: transcribe(_live_chunk.wav) — acquires _transcribe_lock
+            ASR-->>LP: segments[]
+            LP->>MEM: append (base_seconds, seg) for each non-empty segment
+            LP-->>GUI: status_changed "Recording... (N s pre-transcribed)"
+            LP->>LP: _live_processed_samples = total_samples
+        end
+    end
+
+    User->>GUI: Click "Stop Recording"
+    GUI->>LP: Set _live_pipeline_stop_event
+    GUI->>LP: join(timeout=10 s)
+    LP->>LP: Delete _live_chunk.wav
+    LP-->>GUI: thread exits
+
+    Note over GUI: Post-processing fast path
+    GUI->>GUI: _process_with_live_segments()
+    GUI->>ASR: transcribe(tail_only.wav) — only audio after _live_processed_samples
+    GUI->>GUI: Merge live_segments + tail_segments → _OffsetSegment list
+    GUI->>GUI: engine._save_transcript() — writes transcript.txt as normal
+```
+
+> **Timestamp alignment**: each segment's `start` time is relative to the chunk slice passed to Whisper. The live pipeline records the `base_seconds` offset (`_live_processed_samples / SAMPLE_RATE`) alongside each segment. At merge time, `_OffsetSegment` adds the offset to produce absolute session timestamps.
+
+> **Cancellation and post-processing serialisation**: `_live_pipeline_stop_event` is passed as `cancel_event` to `whisper.transcribe()`, so an in-progress live transcription exits within ≤100 ms of Stop. `WhisperManager._transcribe_lock` ensures the post-processing tail transcription waits until the live thread has released the model.
+
+### 3.7 Settings & Preferences Lifecycle
 
 This flow describes how application parameters (F-33) are loaded once at module startup and how UI preferences (F-32) are saved on close and restored at next launch.
 
@@ -333,7 +385,7 @@ sequenceDiagram
     Note over FS: Preferences persisted for next launch (F-32)
 ```
 
-### 3.7 Manual Model Re-installation
+### 3.8 Manual Model Re-installation
 
 The **Install Whisper** and **Install Pyannote** buttons (F-31) allow the user to trigger model installation from an Idle state without restarting the application. Both flows reuse the sub-flows defined in §3.1.
 
@@ -374,6 +426,14 @@ sequenceDiagram
 
 ### 4.1 Thread Safety
 All background threads communicate with the UI exclusively via Qt signals. No background thread holds a direct reference to a UI widget. The `Signals` object is created on the main thread and passed to background operations. The `messagebox_requested` signal (CD §2.1) extends this pattern to allow background threads to trigger modal dialogs without touching Qt widgets directly. See CD §2.1 for the full signal inventory and CD §8.3 for slot wiring.
+
+**Responsive cancellation** uses two sub-patterns (see CD §3.2 DR-213 and CD §6.2 DR-214):
+- *Producer/consumer (transcription)*: the segment generator runs on a daemon thread feeding a `Queue(maxsize=1)`; the consumer polls with a 100 ms timeout so `cancel_event` is checked at that interval regardless of segment inference time.
+- *Daemon-thread abandonment (diarization)*: the blocking pipeline call runs on a daemon thread; the caller polls a `threading.Event` every 100 ms and returns `None` immediately if cancelled, leaving the daemon to finish in the background.
+
+**Live pipeline thread safety** (see CD §3.2 DR-213 and CD §5.2 DR-219):
+- *Transcription lock*: `WhisperManager._transcribe_lock` (`threading.Lock`) serialises all `transcribe()` calls. The live pipeline thread and the post-processing thread share the same `WhisperModel` instance; the lock guarantees they never call it concurrently.
+- *Chunk buffer lock*: `AudioRecorder._chunks_lock` (`threading.Lock`) protects `_speaker_chunks` and `_mic_chunks` against concurrent writes (capture threads) and reads (`get_mixed_since`, `_mix`, `save_wav`).
 
 ### 4.2 Logging
 All components write to a shared daily log file via the standard Python `logging` module. A global `sys.excepthook` ensures unhandled exceptions are logged before the process exits (NF-05, NF-06). Sensitive values (tokens, credentials) are never passed to log calls — they are referenced only inside `DiarizationEngine.save_token` / `load_token` which write nothing to the log (NF-10).
@@ -492,6 +552,10 @@ The **Architecture Ref** column contains section numbers within *this document*:
 | F-21 | Session saved in timestamped folder | MainWindow | §3.3 | DR-152 |
 | F-22 | Transcript file with timestamps | TranscriptionEngine | §3.3 | DR-009–DR-014, DR-099, DR-103–DR-105, DR-156 |
 | F-23 | Diarized transcript with speaker labels | TranscriptionEngine | §3.3 | DR-102, DR-110–DR-112 |
+| F-36 | Live transcription concurrent with recording | MainWindow, ASREngine, AudioRecorder | §3.6, §4.1 | DR-220, DR-221, DR-222, DR-223, DR-224, DR-225 |
+| F-37 | Pre-transcribed segments reused; only tail re-transcribed | MainWindow | §3.6 | DR-221, DR-232, DR-233, DR-234–DR-239 |
+| F-38 | Live transcription stops before post-processing | MainWindow | §3.6 | DR-227, DR-230 |
+| F-39 | Output folder created at recording start | MainWindow | §3.6 | DR-229 |
 | F-24 | Audio saved alongside transcripts | AudioRecorder, MainWindow | §3.3 | DR-078, DR-154 |
 | F-25 | Existing output files never overwritten | TranscriptionEngine | §3.3 | DR-103, DR-104, DR-110, DR-111, DR-113, DR-114 |
 | F-35 | Open output folder from completion dialog | MainWindow | §3.3 | DR-192, DR-193 |

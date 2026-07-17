@@ -24,6 +24,8 @@
 | `_KEYRING_SERVICE` | `"MeetingTranscription"` | Service name used for OS credential store |
 | `_KEYRING_USERNAME` | `"huggingface_token"` | Username key used for OS credential store |
 | `_KEYRING_AVAILABLE` | `bool` | `True` if the `keyring` package was successfully imported |
+| `PIPELINE_TRANSCRIPTION` | `bool` | `True` if live in-session transcription is enabled (from `config.json`) |
+| `PIPELINE_CHUNK_SECONDS` | `int` | Duration in seconds of each live transcription chunk; minimum 3 (from `config.json`) |
 
 ### 1.2 Configuration defaults
 
@@ -33,6 +35,8 @@ _CONFIG_DEFAULTS = {
     "model_size":   "medium",
     "beam_size":    5,
     "vad":          True,
+    "pipeline_transcription": False,
+    "pipeline_chunk_seconds": 10,
 }
 
 _SETTINGS_DEFAULTS = {
@@ -264,6 +268,7 @@ Transcribes a WAV file. Iterates the segment generator and stops early if `cance
 | DR-026 | If `cancel_event` is not provided or is never signalled, transcription runs to completion and all segments are returned. |
 | DR-027 | If `cancel_event` is signalled during iteration, transcription stops at the current segment and the partial list collected so far is returned. |
 | DR-028 | If the model produces no speech segments, an empty list is returned. |
+| DR-213 | All execution inside `transcribe()` is serialised under `self._transcribe_lock`; if a second thread calls `transcribe()` while the first is still running, it blocks until the lock is released. This prevents concurrent inference on the shared `WhisperModel` instance from the live pipeline thread and the post-processing thread. |
 ---
 
 ## 4. Class: `PyannoteManager`
@@ -443,6 +448,7 @@ def __init__(self, sample_rate: int = SAMPLE_RATE, chunk_size: int = CHUNK_SIZE)
 | `chunk_size` | `int` | As passed |
 | `speaker_error` | `str \| None` | Error message from speaker thread, or `None` |
 | `mic_error` | `str \| None` | Error message from mic thread, or `None` |
+| `_chunks_lock` | `threading.Lock` | Mutex protecting concurrent access to `_speaker_chunks` and `_mic_chunks` |
 
 ### 5.2 Methods
 
@@ -591,6 +597,62 @@ Concatenates and pads speaker and mic arrays to the same length, sums them, peak
 | DR-095 | If one stream is shorter than the other, the shorter one is zero-padded to match the longer before summing. |
 | DR-096 | If the summed signal's peak amplitude exceeds 1.0, the signal is normalised to 1.0 and then scaled to 0.95. |
 | DR-097 | If the summed signal's peak is 1.0 or below, no normalisation step is applied and the signal is scaled directly to 0.95. |
+
+> `_mix()` acquires `_chunks_lock` internally, then delegates to `_mix_streams()`. See DR-218 and DR-219 for the thread-safety and static-method requirements.
+---
+
+#### `get_mixed_since(start_sample: int = 0) -> tuple[np.ndarray, int]` 
+
+Returns only the audio recorded after `start_sample`, without concatenating the entire history. Cost is O(new audio) regardless of how long the session has been running.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `start_sample` | `int` | Sample offset from the beginning of the session; only samples at or after this index are returned |
+
+**Returns**: `(audio, total)` where `audio` is a `float32` numpy array of the mixed audio from `start_sample` onward, and `total` is the total number of samples recorded so far (i.e. `max(speaker_total, mic_total)`).
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-215 | If `start_sample` is less than `total`, only the portion of each stream from `start_sample` onward is concatenated; earlier chunks are skipped entirely. |
+| DR-216 | If `start_sample` is equal to or greater than `total`, an empty array and `total` are returned without any concatenation. |
+| DR-217 | `total` is computed as `max(speaker_total, mic_total)` reflecting the longer of the two independently captured streams. |
+---
+
+#### `_mix_streams(sp: np.ndarray, mic: np.ndarray) -> np.ndarray` *(static)*
+
+Pure static helper: pads two mono float32 arrays to the same length, sums them, normalises if necessary, scales, and clips.
+
+**Returns**: `np.ndarray` (float32, mono).
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-218 | `_mix_streams` is a pure static method with no side effects; it applies the same pad/sum/normalise/scale/clip pipeline as `_mix()` but operates on already-extracted arrays, allowing reuse from both `_mix()` and `get_mixed_since()`. |
+| DR-219 | All accesses to `_speaker_chunks` and `_mic_chunks` from reader paths (`_mix()`, `get_mixed_since()`, `save_wav()`) and writer paths (capture loop bodies, `start()`) are protected by `_chunks_lock`, ensuring no torn reads or writes. |
+---
+
+## 6. Class: `TranscriptionEngine`
+
+> **Architecture mapping (ARCH)**: §2.2 `TranscriptionEngine` (Orchestration Layer); §2.3 dependency-injection receiver from `MainWindow`; orchestrates §3.3 Transcription & Diarization Pipeline and §3.5 WAV File Transcription.
+
+**Purpose**: orchestrates the full processing pipeline — ASR transcription, diarization, speaker-to-word assignment, and file output.
+
+---
+
+## 5c. Classes: `_OffsetWord` / `_OffsetSegment`
+
+> **Architecture mapping (ARCH)**: §3.6 live pipeline fast path.
+
+**Purpose**: lightweight proxy classes that wrap a faster-whisper `Segment` / `Word` and shift every timestamp by a constant `offset` in seconds. They expose only the attributes that `TranscriptionEngine._save_transcript()` and `_assign_speakers_to_words()` access (`.text`, `.start`, `.end`, `.words`, `.word`), so the engine requires no changes.
+
+`_OffsetWord(word, offset)` — `.start` and `.end` are `word.start + offset` and `word.end + offset`.  
+`_OffsetSegment(seg, offset)` — `.start = seg.start + offset`, `.end = seg.end + offset`, `.words = [_OffsetWord(w, offset) for w in seg.words]`.
+
+Used by `MainWindow._process_with_live_segments()` to create a unified segment list from pre-transcribed live segments and the tail segment, before writing the final `transcript.txt`.
+
 ---
 
 ## 6. Class: `TranscriptionEngine`
@@ -668,6 +730,7 @@ Loads the WAV with `soundfile`, converts to a torch tensor, runs the pyannote pi
 | DR-107 | If the WAV file is multi-channel, it is converted to the expected channel-first layout before being passed to the pipeline. |
 | DR-108 | If `on_status` is provided, it is called before the pipeline runs; if omitted, no callback is made. |
 | DR-109 | If a GPU is available, the audio data is moved to the GPU before the pipeline call; otherwise it remains on CPU. |
+| DR-214 | The blocking pipeline call runs on a daemon thread; the caller polls `cancel_event` every ≤100 ms via `threading.Event.wait(timeout=0.1)` and returns `None` immediately if the event is set, without waiting for the pipeline daemon to finish. |
 ---
 
 #### `_save_diarized_transcript(segments: list, speaker_segments: Annotation, output_dir: Path) -> Path` *(private)*
@@ -809,6 +872,11 @@ Validates that the token field is non-empty, saves the token via `manager.save_t
 | `pyannote_ready` | `bool` | Whether the pyannote pipeline is loaded |
 | `_processing` | `bool` | Whether post-recording processing is active |
 | `_cancel_event` | `threading.Event` | Set when the user requests cancellation |
+| `_live_pipeline_stop_event` | `threading.Event` | Set to stop the live pipeline thread |
+| `_live_pipeline_thread` | `threading.Thread \| None` | Running live pipeline thread, or `None` |
+| `_recording_output_dir` | `Path \| None` | Output folder created at recording start; `None` when idle |
+| `_live_transcribed_segments` | `list` | Accumulates `(base_seconds, Segment)` pairs collected by the live pipeline; cleared at post-processing start |
+| `_live_processed_samples` | `int` | Total samples already covered by the live pipeline |
 
 ### 8.2 Initialisation sequence
 
@@ -897,6 +965,50 @@ Reads current source/device selections, shows level meters, resets mute button, 
 | DR-149 | If the microphone checkbox is unchecked, the microphone level meter is hidden and microphone capture is disabled. |
 | DR-150 | If the speaker checkbox is checked, the speaker level meter is shown and speaker capture is enabled. |
 | DR-151 | If the speaker checkbox is unchecked, the speaker level meter is hidden and speaker capture is disabled. |
+| DR-229 | The session output folder is created at the moment recording starts (not when it stops); this folder is stored in `_recording_output_dir` so both the live pipeline and post-processing use the same path. |
+---
+
+#### `_start_live_pipeline(language: str | None) -> None`
+
+Resets segment accumulator and counters, then starts the `_run_live_pipeline` background thread. Called from `_start_recording()` when `PIPELINE_TRANSCRIPTION` is `True` and Whisper is ready.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `language` | `str \| None` | Language code forwarded to `whisper.transcribe()` |
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-220 | If `_recording_output_dir` is `None`, the method returns immediately without starting the pipeline. |
+| DR-221 | If `_recording_output_dir` is set, the method resets `_live_transcribed_segments` to an empty list, clears `_live_pipeline_stop_event`, resets `_live_processed_samples` to 0, and starts the live pipeline background thread. |
+---
+
+#### `_run_live_pipeline(language: str | None) -> None` *(background thread)*
+
+Main loop of the live transcription pipeline. Runs until `_live_pipeline_stop_event` is set.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-222 | If the amount of new audio since `_live_processed_samples` is less than `PIPELINE_CHUNK_SECONDS × SAMPLE_RATE` samples, the loop sleeps 0.7 s and retries without calling Whisper. |
+| DR-223 | When enough audio is available, it is written to a temporary WAV file (`_live_chunk.wav` in the session folder) and passed to `whisper.transcribe()` with `_live_pipeline_stop_event` as the cancellation event. |
+| DR-224 | For each returned segment with non-empty text, a `(base_seconds, segment)` tuple is appended to `_live_transcribed_segments`, where `base_seconds = _live_processed_samples / SAMPLE_RATE`. The absolute timestamp will be `base_seconds + segment.start` at merge time. |
+| DR-225 | After each successful transcription cycle, `_live_processed_samples` is updated to `total_samples` as returned by `get_mixed_since()`; this ensures the next cycle processes only newly arrived audio. |
+| DR-226 | When the loop exits (stop event set), `_live_chunk.wav` is deleted if it exists. |
+---
+
+#### `_stop_live_pipeline() -> None`
+
+Signals the live pipeline thread to stop and waits for it to terminate.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-227 | The method sets `_live_pipeline_stop_event` and calls `join(timeout=10)` on the live pipeline thread if it is alive. |
+| DR-228 | If the thread has not exited within the 10 s timeout, a warning is logged and `_live_pipeline_thread` is set to `None` without raising. |
 ---
 
 #### `_stop_recording() -> None`
@@ -908,6 +1020,7 @@ Stops the level timer, hides meters, calls `recorder.stop()`, resets mute state,
 | ID | Requirement |
 |---|---|
 | DR-152 | single path — all recording state is unconditionally reset and processing is always launched with the current language, transcription, and diarization settings. During the transition to processing, control visibility is refreshed immediately via `_update_controls()` so install actions are visible as soon as model readiness requires them. |
+| DR-230 | Before spawning the post-processing thread, `_stop_live_pipeline()` is called; this guarantees that the live pipeline thread has terminated (or timed out) and that `WhisperManager._transcribe_lock` is free before post-processing begins. |
 
 ---
 
@@ -924,6 +1037,35 @@ Creates the output folder, calls `recorder.save_wav`, then `engine.process`. Emi
 | DR-155 | If the transcription engine raises an error, an error signal is emitted. |
 | DR-156 | If transcription completes normally without cancellation, the path of the produced transcript is emitted as the result. |
 | DR-157 | If cancellation was requested during processing, a cancellation signal is emitted, carrying the folder path if a partial transcript was saved. |
+| DR-231 | If `_recording_output_dir` is already set (created at recording start), that folder is reused as the output directory; if it is unexpectedly `None`, a new timestamped folder is created as a fallback. In both cases, `_recording_output_dir` is reset to `None` on exit. |
+| DR-232 | If the live pipeline accumulated any segments (`_live_transcribed_segments` is non-empty), `_process_with_live_segments()` is called instead of `engine.process()`; the accumulated segment list is snapshotted and cleared before the call. |
+| DR-233 | If no live segments are available (live pipeline was disabled, or Whisper was not ready at recording start), the normal full-audio `engine.process()` path is used unchanged. |
+---
+
+#### `_process_with_live_segments(wav, output_dir, language, enable_diarization, live_pairs) -> Path | None` *(background thread)*
+
+Fast post-processing path used when the live pipeline collected at least one segment.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `wav` | `Path` | Full session WAV saved by `save_wav()` |
+| `output_dir` | `Path` | Session output folder |
+| `language` | `str \| None` | Language code or auto-detect |
+| `enable_diarization` | `bool` | Whether to run pyannote after transcription |
+| `live_pairs` | `list` | Snapshot of `_live_transcribed_segments`: `[(base_seconds, Segment), …]` |
+
+**Behaviour**: reads the full WAV once to determine total length, extracts only the tail (samples `_live_processed_samples … end`), transcribes the tail, builds `_OffsetSegment` objects for both live and tail segments, then delegates to `engine._save_transcript()` and optionally `engine._save_diarized_transcript()`.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-234 | The full WAV is read to determine total sample count; if reading fails, the method falls back to `engine.process()` on the full audio. |
+| DR-235 | If `_live_processed_samples < total_samples` and cancellation has not been requested, the tail slice is written to a temporary `_tail.wav`, transcribed, and the file is deleted afterwards. |
+| DR-236 | Pre-transcribed segments and tail segments are each wrapped in `_OffsetSegment` with the appropriate `base_seconds` offset before being merged. |
+| DR-237 | If the combined segment list is empty (no speech detected anywhere), `None` is returned. |
+| DR-238 | If diarization is disabled or cancelled, only `transcript.txt` is produced. |
+| DR-239 | If diarization is enabled and not cancelled, `engine._run_diarization()` is called on the full WAV and `engine._save_diarized_transcript()` is called with the merged `_OffsetSegment` list. |
 ---
 
 #### `_transcribe_wav_file(wav_path, language, enable_diarization) -> None` *(background thread)*
@@ -1271,7 +1413,9 @@ This section provides full, function-level traceability from every element of `A
 | Microphone muting | `mute_mic()` §5.2 |
 | Real-time audio level reading | `get_levels()` §5.2 |
 | Stream mixing | `_mix()` §5.2 |
-| Peak normalisation | `_mix()` §5.2 |
+| Mixed-stream static helper | `_mix_streams()` §5.2 |
+| Thread-safe incremental audio snapshot | `get_mixed_since()` §5.2 |
+| Peak normalisation | `_mix()`, `_mix_streams()` §5.2 |
 | WAV file export | `save_wav()` §5.2 |
 | Device error notification via callback | `_record_speaker()`, `_record_microphone()` §5.2 |
 
@@ -1304,6 +1448,9 @@ This section provides full, function-level traceability from every element of `A
 | Whisper model loading orchestration (§3.1) | `_load_models()` §8.4 |
 | Pyannote setup and load orchestration (§3.1) | `_initialize_pyannote()`, `_load_pyannote_pipeline()` §8.4 |
 | Recording start (§3.2) | `_start_recording()` §8.5 |
+| Live pipeline start (§3.6) | `_start_live_pipeline()` §8.5 |
+| Live pipeline main loop (§3.6) | `_run_live_pipeline()` §8.5 |
+| Live pipeline stop (§3.6) | `_stop_live_pipeline()` §8.5 |
 | Recording stop + processing thread spawn (§3.2→§3.3) | `_stop_recording()` §8.5 |
 | Post-recording processing (§3.3) | `_process_recording()` §8.5 |
 | WAV file transcription (§3.5) | `_transcribe_wav_file()` §8.5 |
@@ -1341,6 +1488,8 @@ This section provides full, function-level traceability from every element of `A
 | Concern (ARCH §) | Implementing Method(s) |
 |---|---|
 | §4.1 Thread Safety | `Signals` §2.1 (all signal declarations); `MainWindow._connect_signals()` §8.3; all background threads access UI only through signals |
+| §4.1 Transcription lock | `WhisperManager._transcribe_lock` (DR-213 §3.2) — serialises live pipeline and post-processing calls to `transcribe()` |
+| §4.1 Chunk buffer lock | `AudioRecorder._chunks_lock` (DR-219 §5.2) — protects `_speaker_chunks`/`_mic_chunks` from concurrent reader+writer access |
 | §4.2 Logging — error capture | Module-level `log = logging.getLogger(__name__)` §1.3; `sys.excepthook` §1.3; `log.error/warning/info` calls in every class |
 | §4.2 Logging — no tokens in logs | `PyannoteManager.save_token()`, `load_token()`, `delete_token()` §4.2 — token strings never passed to `log` calls |
 | §4.3 Single Instance | Module-level socket lock §1.3 — executed before `MainWindow.__init__` |
@@ -1385,7 +1534,9 @@ This section provides full, function-level traceability from every element of `A
 |---|---|
 | Configure sources and devices | `MainWindow._on_source_toggled()` §8.6; combo boxes in `_setup_ui()` §8.3 |
 | Click "Start Recording" | `MainWindow._start_recording()` §8.5 |
+| Create output folder at recording start | `MainWindow._start_recording()` §8.5 (DR-229) |
 | `start(mic, speaker, device IDs)` | `AudioRecorder.start()` §5.2 |
+| Start live pipeline thread (if enabled) | `MainWindow._start_live_pipeline()` §8.5 |
 | Start level meter timer | `MainWindow._start_recording()` §8.5 — starts 80 ms QTimer |
 | `get_levels()` per tick | `AudioRecorder.get_levels()` §5.2 |
 | Update level bars | `MainWindow._update_levels()` §8.6 |
@@ -1395,6 +1546,7 @@ This section provides full, function-level traceability from every element of `A
 | Click "Stop Recording" | `MainWindow._stop_recording()` §8.5 |
 | Stop level meter timer | `MainWindow._stop_recording()` §8.5 |
 | `stop()` — join capture threads | `AudioRecorder.stop()` §5.2 |
+| Stop live pipeline, join thread | `MainWindow._stop_live_pipeline()` §8.5 (DR-227) |
 | Show Cancel, disable Start | `MainWindow._update_controls()` §8.6 |
 | Spawn `_process_recording` thread | `MainWindow._stop_recording()` §8.5 |
 
@@ -1402,7 +1554,7 @@ This section provides full, function-level traceability from every element of `A
 
 | Sequence step | Implementing Method |
 |---|---|
-| Create timestamped output folder | `MainWindow._process_recording()` §8.5 |
+| Create timestamped output folder | `MainWindow._process_recording()` §8.5 (DR-231 — reuses folder from `_recording_output_dir`) |
 | `save_wav()` — mix, normalise, write | `AudioRecorder.save_wav()` §5.2 |
 | Internal audio mixing | `AudioRecorder._mix()` §5.2 |
 | `process(wav, language, diarization, cancel_event)` | `TranscriptionEngine.process()` §6.2 |
@@ -1449,7 +1601,27 @@ This section provides full, function-level traceability from every element of `A
 | Emit `finished` | `MainWindow._transcribe_wav_file()` §8.5 → `Signals.finished` §2.1 |
 | Handle `finished` — show dialog with Open Folder (F-35) | `MainWindow._on_transcription_finished()` §8.7 |
 
-#### ARCH §3.6 — Settings & Preferences Lifecycle
+#### ARCH §3.6 — Live Pipeline Transcription
+
+| Sequence step | Implementing Method |
+|---|---|
+| Create output folder at recording start | `MainWindow._start_recording()` §8.5 |
+| Start live pipeline thread | `MainWindow._start_live_pipeline()` §8.5 |
+| `get_mixed_since(_live_processed_samples)` | `AudioRecorder.get_mixed_since()` §5.2 |
+| Write temp chunk WAV | `sf.write()` inside `_run_live_pipeline()` §8.5 |
+| `transcribe(_live_chunk.wav)` — live | `WhisperManager.transcribe()` §3.2 (acquires `_transcribe_lock`) |
+| Accumulate `(base_seconds, seg)` in `_live_transcribed_segments` | `MainWindow._run_live_pipeline()` §8.5 |
+| Update `_live_processed_samples` | `MainWindow._run_live_pipeline()` §8.5 |
+| Set stop event, join thread | `MainWindow._stop_live_pipeline()` §8.5 |
+| Delete `_live_chunk.wav` | `MainWindow._run_live_pipeline()` §8.5 (finally block) |
+| Snapshot `_live_transcribed_segments`, select fast/normal path | `MainWindow._process_recording()` §8.5 |
+| Read full WAV, extract tail audio | `MainWindow._process_with_live_segments()` §8.5 |
+| Transcribe tail only | `WhisperManager.transcribe()` §3.2 |
+| Wrap segments in `_OffsetSegment` and merge | `MainWindow._process_with_live_segments()` §8.5 |
+| Write `transcript.txt` from merged list | `TranscriptionEngine._save_transcript()` §6.2 |
+| Optionally diarize full WAV and write `transcript_diarized.txt` | `TranscriptionEngine._run_diarization()`, `_save_diarized_transcript()` §6.2 |
+
+#### ARCH §3.7 — Settings & Preferences Lifecycle
 
 | Sequence step | Implementing Method |
 |---|---|
@@ -1460,7 +1632,7 @@ This section provides full, function-level traceability from every element of `A
 | `closeEvent()` triggers save | `MainWindow.closeEvent()` §8.8 |
 | `_save_settings()` on close | `MainWindow._save_settings()` §8.8 |
 
-#### ARCH §3.7 — Manual Model Re-installation
+#### ARCH §3.8 — Manual Model Re-installation
 
 | Sequence step | Implementing Method |
 |---|---|
@@ -1500,6 +1672,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-017–DR-018 | is_installed() | F-26 | §3.1 |
 | DR-019–DR-023 | load() | F-26, NF-03, NF-04, NF-05 | §3.1, §4.5 |
 | DR-024–DR-028 | 	ranscribe() | F-10, F-12, F-14, F-15 | §3.3, §3.5 |
+| DR-213 | transcribe() — lock serialisation | F-36, F-38 | §3.6, §4.1 |
 
 ---
 
@@ -1531,6 +1704,16 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-084–DR-087 | _record_speaker() | F-02, F-05, C-01, NF-07, NF-08 | §3.2 |
 | DR-088–DR-092 | _record_microphone() | F-01, F-04, F-06, NF-07, NF-08 | §3.2 |
 | DR-093–DR-097 | _mix() | F-01, F-02 | §3.3 |
+| DR-215–DR-217 | get_mixed_since() | F-36, F-37 | §3.6 |
+| DR-218–DR-219 | _mix_streams() / _chunks_lock | F-36 | §3.6, §4.1 |
+
+---
+
+### 10.4b `_OffsetSegment` / `_OffsetWord`
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| (structural) | `_OffsetSegment.__init__`, `_OffsetWord.__init__` | F-37 | §3.6 |
 
 ---
 
@@ -1541,6 +1724,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-098–DR-102 | process() | F-10, F-14, F-15, F-17, F-22, F-23 | §3.3, §3.5 |
 | DR-103–DR-105 | _save_transcript() | F-22, F-25 | §3.3 |
 | DR-106–DR-109 | _run_diarization() | F-17, NF-03 | §3.3 |
+| DR-214 | _run_diarization() — daemon thread polling | F-14, F-15 | §3.3, §4.1 |
 | DR-110–DR-112 | _save_diarized_transcript() | F-23, F-25 | §3.3 |
 | DR-113–DR-114 | _unique_path() | F-25 | §3.3 |
 | DR-115–DR-118 | _find_best_speaker() | F-20 | §3.3 |
@@ -1571,8 +1755,13 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR range | Implementing Method | SRS IDs | Architecture Ref |
 |---|---|---|---|
 | DR-148–DR-151 | _start_recording() | F-01, F-02, F-03, F-07 | §3.2 |
-| DR-152 | _stop_recording() | F-10, F-21 | §3.2, §3.3 |
-| DR-153–DR-157 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, NF-07, NF-08 | §3.3 |
+| DR-229 | _start_recording() — folder at start | F-39 | §3.6 |
+| DR-220–DR-221 | _start_live_pipeline() | F-36, F-37 | §3.6 |
+| DR-222–DR-226 | _run_live_pipeline() | F-36, F-37 | §3.6 |
+| DR-227–DR-228 | _stop_live_pipeline() | F-38 | §3.6 |
+| DR-152, DR-230 | _stop_recording() | F-10, F-21, F-38 | §3.2, §3.3, §3.6 |
+| DR-153–DR-157, DR-231–DR-233 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, F-37, NF-07, NF-08 | §3.3, §3.6 |
+| DR-234–DR-239 | _process_with_live_segments() | F-37 | §3.6 |
 | DR-158–DR-160 | _transcribe_wav_file() | F-14, F-15, F-16, NF-05, NF-08 | §3.5 |
 
 ---

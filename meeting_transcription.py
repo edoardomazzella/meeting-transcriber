@@ -42,6 +42,8 @@ _CONFIG_DEFAULTS = {
     "compute_type_gpu":    "int8_float16",
     "chunk_length":        30,
     "pyannote_batch_size": 16,
+    "pipeline_transcription": False,
+    "pipeline_chunk_seconds": 10,
 }
 
 def _load_config():
@@ -66,6 +68,8 @@ CPU_THREADS       = int(_cfg["cpu_threads"])
 COMPUTE_TYPE_GPU  = _cfg["compute_type_gpu"]
 CHUNK_LENGTH      = int(_cfg["chunk_length"])
 PYANNOTE_BATCH    = int(_cfg["pyannote_batch_size"])
+PIPELINE_TRANSCRIPTION = bool(_cfg.get("pipeline_transcription", False))
+PIPELINE_CHUNK_SECONDS = max(3, int(_cfg.get("pipeline_chunk_seconds", 10)))
 
 _SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 _SETTINGS_DEFAULTS = {
@@ -203,6 +207,7 @@ class WhisperManager:
     def __init__(self, model_dir):
         self.model_dir = Path(model_dir)
         self.model = None
+        self._transcribe_lock = threading.Lock()
 
     def is_installed(self):
         return (self.model_dir / f"models--Systran--faster-whisper-{MODEL_SIZE}").exists()
@@ -264,52 +269,53 @@ class WhisperManager:
         """
         import queue as _queue
 
-        if on_status:
-            on_status("Transcribing...")
-        log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
-        args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True,
-                    condition_on_previous_text=False, temperature=0, chunk_length=CHUNK_LENGTH)
-        if language:
-            args["language"] = language
-        segments_gen, _ = self.model.transcribe(**args)
+        with self._transcribe_lock:
+            if on_status:
+                on_status("Transcribing...")
+            log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
+            args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True,
+                        condition_on_previous_text=False, temperature=0, chunk_length=CHUNK_LENGTH)
+            if language:
+                args["language"] = language
+            segments_gen, _ = self.model.transcribe(**args)
 
-        _DONE = object()
-        _q = _queue.Queue(maxsize=1)
+            _DONE = object()
+            _q = _queue.Queue(maxsize=1)
 
-        def _producer():
-            try:
-                for seg in segments_gen:
+            def _producer():
+                try:
+                    for seg in segments_gen:
+                        if cancel_event and cancel_event.is_set():
+                            break
+                        _q.put(seg)
+                except Exception as _exc:
+                    _q.put(_exc)
+                finally:
+                    _q.put(_DONE)
+
+            _producer_thread = threading.Thread(target=_producer, daemon=True)
+            _producer_thread.start()
+
+            result = []
+            while True:
+                try:
+                    item = _q.get(timeout=0.1)
+                except _queue.Empty:
                     if cancel_event and cancel_event.is_set():
                         break
-                    _q.put(seg)
-            except Exception as _exc:
-                _q.put(_exc)
-            finally:
-                _q.put(_DONE)
-
-        _producer_thread = threading.Thread(target=_producer, daemon=True)
-        _producer_thread.start()
-
-        result = []
-        while True:
-            try:
-                item = _q.get(timeout=0.1)
-            except _queue.Empty:
+                    continue
+                if item is _DONE:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                result.append(item)
                 if cancel_event and cancel_event.is_set():
                     break
-                continue
-            if item is _DONE:
-                break
-            if isinstance(item, Exception):
-                raise item
-            result.append(item)
-            if cancel_event and cancel_event.is_set():
-                break
 
-        log.info("Transcription %s (%d segments)",
-                 "cancelled" if (cancel_event and cancel_event.is_set()) else "completed",
-                 len(result))
-        return result
+            log.info("Transcription %s (%d segments)",
+                     "cancelled" if (cancel_event and cancel_event.is_set()) else "completed",
+                     len(result))
+            return result
 
 
 # ── PyannoteManager ───────────────────────────────────────────────────────────
@@ -449,6 +455,7 @@ class AudioRecorder:
         self._mic_id = None
         self._mic_muted = False
         self._on_device_error = None
+        self._chunks_lock = threading.Lock()
 
     def start(self, enable_speaker=True, enable_mic=True, speaker_id=None, mic_id=None, on_device_error=None):
         self._on_device_error = on_device_error
@@ -456,8 +463,9 @@ class AudioRecorder:
         self._mic_id = mic_id
         self._enable_speaker = enable_speaker
         self._enable_mic = enable_mic
-        self._speaker_chunks = []
-        self._mic_chunks = []
+        with self._chunks_lock:
+            self._speaker_chunks = []
+            self._mic_chunks = []
         self.speaker_error = None
         self.mic_error = None
         self._stop_event = threading.Event()
@@ -497,11 +505,47 @@ class AudioRecorder:
         if on_status:
             on_status("Preparing audio...")
         mixed = self._mix()
-        self._speaker_chunks.clear()
-        self._mic_chunks.clear()
+        with self._chunks_lock:
+            self._speaker_chunks.clear()
+            self._mic_chunks.clear()
         wav = Path(output_dir) / "mixed.wav"
         sf.write(str(wav), mixed, self.sample_rate)
         return wav
+
+    def get_mixed_since(self, start_sample=0):
+        """Return (mixed_audio_from_start_sample, total_samples_currently_recorded).
+
+        Only the audio starting from start_sample is concatenated; earlier chunks
+        are skipped entirely so memory and CPU cost stay O(new_audio) regardless
+        of how long the session has been running.
+        """
+        with self._chunks_lock:
+            speaker_chunks = list(self._speaker_chunks)
+            mic_chunks = list(self._mic_chunks)
+
+        def _extract_from(chunks, start):
+            """Concatenate only the portion of chunks that starts at or after `start`."""
+            if not chunks:
+                return np.zeros(0, np.float32)
+            pos = 0
+            parts = []
+            for c in chunks:
+                end = pos + len(c)
+                if end > start:
+                    parts.append(c[max(0, start - pos):])
+                pos = end
+            return np.concatenate(parts) if parts else np.zeros(0, np.float32)
+
+        sp_total = sum(len(c) for c in speaker_chunks)
+        mic_total = sum(len(c) for c in mic_chunks)
+        total = max(sp_total, mic_total)
+
+        if start_sample >= total:
+            return np.zeros(0, np.float32), total
+
+        sp = _extract_from(speaker_chunks, start_sample)
+        mic = _extract_from(mic_chunks, start_sample)
+        return self._mix_streams(sp, mic), total
 
     def _record_speaker(self):
         try:
@@ -520,7 +564,8 @@ class AudioRecorder:
                     c = r.record(numframes=self.chunk_size)
                     if c.ndim > 1:
                         c = np.mean(c, axis=1)
-                    self._speaker_chunks.append(c.astype(np.float32))
+                    with self._chunks_lock:
+                        self._speaker_chunks.append(c.astype(np.float32))
         except Exception as e:
             log.error("Speaker loopback error: %s", e, exc_info=True)
             self.speaker_error = str(e)
@@ -544,9 +589,11 @@ class AudioRecorder:
                     if c.ndim > 1:
                         c = np.mean(c, axis=1)
                     if self._mic_muted:
-                        self._mic_chunks.append(np.zeros(len(c), np.float32))
+                        with self._chunks_lock:
+                            self._mic_chunks.append(np.zeros(len(c), np.float32))
                     else:
-                        self._mic_chunks.append(c.astype(np.float32))
+                        with self._chunks_lock:
+                            self._mic_chunks.append(c.astype(np.float32))
         except Exception as e:
             log.error("Microphone error: %s", e, exc_info=True)
             self.mic_error = str(e)
@@ -554,8 +601,16 @@ class AudioRecorder:
                 self._on_device_error(f"⚠ Microphone device error: {e}")
 
     def _mix(self):
-        sp = np.concatenate(self._speaker_chunks) if self._speaker_chunks else np.zeros(0, np.float32)
-        mic = np.concatenate(self._mic_chunks) if self._mic_chunks else np.zeros(0, np.float32)
+        with self._chunks_lock:
+            speaker_chunks = list(self._speaker_chunks)
+            mic_chunks = list(self._mic_chunks)
+
+        sp = np.concatenate(speaker_chunks) if speaker_chunks else np.zeros(0, np.float32)
+        mic = np.concatenate(mic_chunks) if mic_chunks else np.zeros(0, np.float32)
+        return self._mix_streams(sp, mic)
+
+    @staticmethod
+    def _mix_streams(sp, mic):
         n = max(len(sp), len(mic), 1)
         sp = np.pad(sp, (0, n - len(sp)))
         mic = np.pad(mic, (0, n - len(mic)))
@@ -582,6 +637,36 @@ class AudioRecorder:
         mic = rms_to_level(self._mic_chunks) if self._enable_mic else 0
         spk = rms_to_level(self._speaker_chunks) if self._enable_speaker else 0
         return mic, spk
+
+
+# ── Timestamp-shifted Whisper segment proxies ─────────────────────────────────
+
+class _OffsetWord:
+    """Proxy for a faster-whisper Word with all timestamps shifted by an offset."""
+    __slots__ = ("word", "start", "end")
+
+    def __init__(self, word, offset: float):
+        self.word  = getattr(word, "word",  "")
+        self.start = (getattr(word, "start", 0.0) or 0.0) + offset
+        self.end   = (getattr(word, "end",   0.0) or 0.0) + offset
+
+
+class _OffsetSegment:
+    """Proxy for a faster-whisper Segment with all timestamps shifted by an offset.
+
+    Provides the same interface used by TranscriptionEngine._save_transcript and
+    _assign_speakers_to_words (.text, .start, .end, .words).
+    """
+    __slots__ = ("text", "start", "end", "words")
+
+    def __init__(self, seg, offset: float):
+        self.text  = seg.text
+        self.start = seg.start + offset
+        self.end   = getattr(seg, "end", seg.start) + offset
+        self.words = [
+            _OffsetWord(w, offset)
+            for w in (getattr(seg, "words", None) or [])
+        ]
 
 
 # ── TranscriptionEngine ───────────────────────────────────────────────────────
@@ -904,6 +989,11 @@ class MainWindow(QWidget):
         self._pyannote_setup_event = threading.Event()
         self._pyannote_setup_result = False
         self._cancel_event = threading.Event()
+        self._live_pipeline_stop_event = threading.Event()
+        self._live_pipeline_thread = None
+        self._recording_output_dir = None
+        self._live_transcribed_segments = []   # list of (base_seconds, Segment)
+        self._live_processed_samples = 0
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle(f"Meeting Transcriber v{__version__}")
@@ -1317,6 +1407,9 @@ class MainWindow(QWidget):
         self.signals.status_changed.emit("Recording...")
         log.info("Recording started (mic=%s, speaker=%s)",
                  self.mic_checkbox.isChecked(), self.speaker_checkbox.isChecked())
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._recording_output_dir = OUTPUT_DIR / ts
+        self._recording_output_dir.mkdir(exist_ok=True)
         self.mic_level_widget.setVisible(self.mic_checkbox.isChecked())
         self.speaker_level_widget.setVisible(self.speaker_checkbox.isChecked())
         self.recorder.start(
@@ -1330,6 +1423,70 @@ class MainWindow(QWidget):
         self.mute_mic_button.setChecked(False)
         self.mute_mic_button.setText("Mute Mic")
 
+        if PIPELINE_TRANSCRIPTION and self.transcribe_checkbox.isChecked() and self.whisper_ready:
+            self._start_live_pipeline(self.language_combo.currentData())
+
+    def _start_live_pipeline(self, language):
+        if not self._recording_output_dir:
+            return
+        self._live_pipeline_stop_event.clear()
+        self._live_processed_samples = 0
+        self._live_transcribed_segments = []
+        self._live_pipeline_thread = threading.Thread(
+            target=self._run_live_pipeline,
+            args=(language,),
+            daemon=True,
+        )
+        self._live_pipeline_thread.start()
+
+    def _run_live_pipeline(self, language):
+        if not self._recording_output_dir:
+            return
+        chunk_samples = max(int(SAMPLE_RATE * PIPELINE_CHUNK_SECONDS), SAMPLE_RATE)
+        live_chunk_wav = self._recording_output_dir / "_live_chunk.wav"
+
+        while not self._live_pipeline_stop_event.is_set():
+            audio, total_samples = self.recorder.get_mixed_since(self._live_processed_samples)
+            if len(audio) < chunk_samples:
+                time.sleep(0.7)
+                continue
+
+            try:
+                sf.write(str(live_chunk_wav), audio, SAMPLE_RATE)
+                segments = self.whisper.transcribe(
+                    live_chunk_wav,
+                    language=language,
+                    on_status=None,
+                    cancel_event=self._live_pipeline_stop_event,
+                )
+            except Exception as e:
+                log.warning("Live pipeline transcription failed: %s", e, exc_info=True)
+                time.sleep(1.0)
+                continue
+
+            base_seconds = self._live_processed_samples / SAMPLE_RATE
+            for seg in segments:
+                if getattr(seg, "text", "").strip():
+                    self._live_transcribed_segments.append((base_seconds, seg))
+
+            n_pre = round(total_samples / SAMPLE_RATE)
+            self.signals.status_changed.emit(f"Recording... ({n_pre} s pre-transcribed)")
+            self._live_processed_samples = total_samples
+
+        try:
+            if live_chunk_wav.exists():
+                live_chunk_wav.unlink()
+        except Exception:
+            log.debug("Could not remove temporary live chunk wav", exc_info=True)
+
+    def _stop_live_pipeline(self):
+        self._live_pipeline_stop_event.set()
+        if self._live_pipeline_thread and self._live_pipeline_thread.is_alive():
+            self._live_pipeline_thread.join(timeout=10)
+            if self._live_pipeline_thread.is_alive():
+                log.warning("Live transcription thread did not terminate within timeout")
+        self._live_pipeline_thread = None
+
     def _stop_recording(self):
         elapsed = int(time.monotonic() - self.start_time) if self.start_time else 0
         log.info("Recording stopped (duration: %02d:%02d:%02d)",
@@ -1340,6 +1497,7 @@ class MainWindow(QWidget):
         self.speaker_level_widget.setVisible(False)
         self.recorder.mute_mic(False)
         self.recorder.stop()
+        self._stop_live_pipeline()
         self._cancel_event.clear()
         self._processing = True
         self.start_button.setEnabled(False)
@@ -1398,8 +1556,10 @@ class MainWindow(QWidget):
 
     def _process_recording(self, language, enable_transcription, enable_diarization):
         try:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            d = OUTPUT_DIR / ts
+            d = self._recording_output_dir
+            if d is None:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                d = OUTPUT_DIR / ts
             d.mkdir(exist_ok=True)
 
             wav = self.recorder.save_wav(d, self.signals.status_changed.emit)
@@ -1409,18 +1569,96 @@ class MainWindow(QWidget):
                 self.signals.finished.emit(str(d), str(wav))
                 return
 
-            result_file = self.engine.process(
-                wav, d, language, enable_diarization,
-                self.signals.status_changed.emit,
-                self._cancel_event,
-            )
+            # Snapshot and clear live segments; use fast path if any were collected.
+            live_pairs = list(self._live_transcribed_segments)
+            self._live_transcribed_segments.clear()
+
+            if live_pairs:
+                result_file = self._process_with_live_segments(
+                    wav, d, language, enable_diarization, live_pairs,
+                )
+            else:
+                result_file = self.engine.process(
+                    wav, d, language, enable_diarization,
+                    self.signals.status_changed.emit,
+                    self._cancel_event,
+                )
+
             if self._cancel_event.is_set():
                 self.signals.cancelled.emit(str(d) if result_file else "")
             else:
                 self.signals.finished.emit(str(d), str(result_file))
+            self._recording_output_dir = None
         except Exception as e:
             log.error("Recording processing failed: %s", e, exc_info=True)
             self.signals.error.emit(str(e))
+            self._recording_output_dir = None
+
+    def _process_with_live_segments(self, wav, output_dir, language,
+                                     enable_diarization, live_pairs):
+        """Fast post-processing path: transcribe only the audio tail that the
+        live pipeline had not yet reached, then merge with pre-transcribed
+        segments to produce the final transcript.
+
+        `live_pairs` is a list of (base_seconds, Segment) tuples collected by
+        the live pipeline.  `self._live_processed_samples` holds the total
+        number of samples already covered by those segments.
+        """
+        # Read the full WAV once to know total length and extract the tail.
+        try:
+            full_audio, _ = sf.read(str(wav), dtype="float32")
+        except Exception as e:
+            log.warning("Could not read WAV for tail extraction; "
+                        "falling back to full transcription: %s", e)
+            return self.engine.process(
+                wav, output_dir, language, enable_diarization,
+                self.signals.status_changed.emit, self._cancel_event,
+            )
+
+        total_samples = len(full_audio) if full_audio.ndim == 1 else full_audio.shape[0]
+        tail_start    = self._live_processed_samples
+        tail_base_s   = tail_start / SAMPLE_RATE
+
+        tail_segments = []
+        if tail_start < total_samples and not self._cancel_event.is_set():
+            tail_audio = full_audio[tail_start:] if full_audio.ndim == 1 \
+                         else full_audio[tail_start:, :]
+            tail_wav = Path(output_dir) / "_tail.wav"
+            try:
+                sf.write(str(tail_wav), tail_audio, SAMPLE_RATE)
+                self.signals.status_changed.emit("Transcribing remaining audio...")
+                tail_segments = self.whisper.transcribe(
+                    tail_wav, language=language,
+                    on_status=None, cancel_event=self._cancel_event,
+                )
+            except Exception as e:
+                log.warning("Tail transcription failed; transcript may be incomplete: %s", e)
+            finally:
+                try:
+                    if tail_wav.exists():
+                        tail_wav.unlink()
+                except Exception:
+                    pass
+
+        del full_audio
+
+        # Build combined segment list with absolute timestamps.
+        all_segs = [_OffsetSegment(seg, base_s) for base_s, seg in live_pairs]
+        all_segs += [_OffsetSegment(seg, tail_base_s) for seg in tail_segments]
+
+        if not all_segs:
+            return None
+
+        txt = self.engine._save_transcript(all_segs, output_dir)
+
+        if not enable_diarization or self._cancel_event.is_set():
+            return txt
+
+        self.signals.status_changed.emit("Running speaker diarization...")
+        speaker_segments = self.engine._run_diarization(wav, cancel_event=self._cancel_event)
+        if speaker_segments is None or self._cancel_event.is_set():
+            return txt
+        return self.engine._save_diarized_transcript(all_segs, speaker_segments, output_dir)
 
     def _on_cancel_clicked(self):
         self._cancel_event.set()

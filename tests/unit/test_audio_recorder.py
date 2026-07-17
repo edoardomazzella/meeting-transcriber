@@ -47,6 +47,11 @@ test_DR_094_mix_uses_mic_chunks_when_present                 DR-094       F-01,F
 test_DR_095_mix_pads_shorter_stream_before_summing           DR-095       F-01,F-02      §3.3
 test_DR_096_mix_normalises_when_peak_exceeds_one             DR-096       F-01,F-02      §3.3
 test_DR_097_mix_does_not_normalise_when_peak_at_or_below_one DR-097       F-01,F-02      §3.3
+test_DR_215_get_mixed_since_returns_only_new_audio           DR-215       F-36,F-37      §3.6
+test_DR_216_get_mixed_since_returns_empty_when_start_past    DR-216       F-36           §3.6
+test_DR_217_get_mixed_since_total_is_max_of_both_streams     DR-217       F-36           §3.6
+test_DR_218_mix_streams_is_static_and_pads_shorter_stream    DR-218       F-36           §3.6,§4.1
+test_DR_219_chunks_lock_protects_concurrent_access           DR-219       F-36           §3.6,§4.1
 
 CI safety
 ---------
@@ -674,3 +679,99 @@ def test_DR_097_mix_does_not_normalise_when_peak_at_or_below_one(rec):
 
     # No normalisation: 0.6 × 0.95 = 0.57
     assert np.max(np.abs(result)) == pytest.approx(0.6 * 0.95, abs=1e-5)
+
+
+# ============================================================================
+# DR-215 to DR-219  get_mixed_since() / _mix_streams() / _chunks_lock
+# ============================================================================
+
+def test_DR_215_get_mixed_since_returns_only_new_audio(rec):
+    """DR-215: get_mixed_since(start_sample) returns only samples from
+    start_sample onward; earlier chunks are skipped, so the returned array
+    length equals total - start_sample."""
+    rec._enable_speaker = False
+    rec._enable_mic = True
+    chunk_a = np.full(100, 0.1, dtype=np.float32)
+    chunk_b = np.full(200, 0.2, dtype=np.float32)
+    rec._mic_chunks = [chunk_a, chunk_b]
+
+    audio, total = rec.get_mixed_since(start_sample=100)
+
+    assert total == 300
+    assert len(audio) == 200
+
+
+def test_DR_216_get_mixed_since_returns_empty_when_start_at_or_past_end(rec):
+    """DR-216: If start_sample >= total, an empty array and the current total
+    are returned without performing any concatenation."""
+    rec._enable_mic = True
+    rec._enable_speaker = False
+    rec._mic_chunks = [np.ones(100, dtype=np.float32)]
+
+    audio_exact, total = rec.get_mixed_since(start_sample=100)
+    audio_past, _ = rec.get_mixed_since(start_sample=999)
+
+    assert total == 100
+    assert len(audio_exact) == 0
+    assert len(audio_past) == 0
+
+
+def test_DR_217_get_mixed_since_total_is_max_of_both_streams(rec):
+    """DR-217: total reflects the longer of the two captured streams
+    (max(speaker_total, mic_total))."""
+    rec._enable_speaker = True
+    rec._enable_mic = True
+    rec._speaker_chunks = [np.ones(150, dtype=np.float32)]
+    rec._mic_chunks = [np.ones(100, dtype=np.float32)]
+
+    audio, total = rec.get_mixed_since(start_sample=0)
+
+    assert total == 150
+    assert len(audio) == 150
+
+
+def test_DR_218_mix_streams_is_static_and_pads_shorter_stream(rec):
+    """DR-218: _mix_streams is a pure static method that pads the shorter
+    stream, sums, normalises if peak > 1, scales to 0.95, and clips."""
+    sp = np.full(200, 0.3, dtype=np.float32)
+    mic = np.full(100, 0.3, dtype=np.float32)
+
+    result = mt.AudioRecorder._mix_streams(sp, mic)
+
+    # Length = longer stream (200)
+    assert len(result) == 200
+    # Positions 0–99: sum=0.6; ×0.95 = 0.57
+    assert result[50] == pytest.approx(0.6 * 0.95, abs=1e-5)
+    # Positions 100–199: only speaker 0.3; ×0.95 = 0.285
+    assert result[150] == pytest.approx(0.3 * 0.95, abs=1e-5)
+
+
+def test_DR_219_chunks_lock_protects_concurrent_access(rec):
+    """DR-219: _chunks_lock is a real threading.Lock; reader and writer threads
+    serialise on it, verified by confirming the lock is acquired while a reader
+    holds it."""
+    import threading
+
+    assert hasattr(rec, "_chunks_lock")
+    assert isinstance(rec._chunks_lock, type(threading.Lock()))
+
+    # Acquire the lock from this thread; then confirm a competing read blocks.
+    acquired = threading.Event()
+    blocked = threading.Event()
+
+    def reader():
+        acquired.wait(timeout=1)
+        # Attempt to acquire — should block while the test holds the lock
+        got = rec._chunks_lock.acquire(blocking=True, timeout=0.1)
+        if not got:
+            blocked.set()
+        else:
+            rec._chunks_lock.release()
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    with rec._chunks_lock:
+        acquired.set()
+        t.join(timeout=0.5)
+
+    assert blocked.is_set(), "_chunks_lock did not block a concurrent reader"

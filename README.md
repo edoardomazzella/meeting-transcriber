@@ -78,7 +78,9 @@ On first launch, `config.json` is created:
     "cpu_threads": 4,
     "compute_type_gpu": "int8_float16",
     "chunk_length": 30,
-    "pyannote_batch_size": 16
+    "pyannote_batch_size": 16,
+    "pipeline_transcription": false,
+    "pipeline_chunk_seconds": 10
 }
 ```
 
@@ -93,6 +95,8 @@ On first launch, `config.json` is created:
 | `compute_type_gpu` | `"int8_float16"` | Numeric precision on GPU. Options: `float16`, `int8_float16` (faster), `int8` |
 | `chunk_length` | `30` | Duration in seconds of each processed audio chunk. Reduce (e.g. `15`) for audio with many short speakers |
 | `pyannote_batch_size` | `16` | Segments diarized in parallel. Increase (e.g. `32`) if VRAM allows; decrease to reduce GPU heat |
+| `pipeline_transcription` | `false` | If `true`, runs incremental transcription while recording and writes a live preview to `transcript_live.txt` |
+| `pipeline_chunk_seconds` | `10` | Size in seconds of each live-transcription chunk. Lower for faster updates, higher for better throughput |
 
 ## Diarization (speaker identification)
 

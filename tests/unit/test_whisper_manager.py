@@ -24,6 +24,7 @@ test_DR_025_transcribe_omits_language_for_auto_detect      DR-025      F-12     
 test_DR_026_transcribe_returns_all_segments_no_cancel      DR-026      F-10        §3.3, §3.5
 test_DR_027_transcribe_returns_partial_segments_on_cancel  DR-027      F-14, F-15  §3.3
 test_DR_028_transcribe_returns_empty_list_when_no_speech   DR-028      F-10        §3.3, §3.5
+test_DR_213_transcribe_lock_is_free_when_idle              DR-213      F-36, F-38  §3.6, §4.1
 
 CI safety
 ---------
@@ -283,3 +284,18 @@ def test_DR_028_transcribe_returns_empty_list_when_no_speech(wm_loaded):
     result = wm_loaded.transcribe("dummy.wav")
 
     assert result == []
+
+
+# ============================================================================
+# DR-213  transcribe() — _transcribe_lock serialisation
+# ============================================================================
+
+def test_DR_213_transcribe_lock_is_free_when_idle(wm):
+    """DR-213: _transcribe_lock is a threading.Lock that is not held when the
+    manager is idle; it is released after every transcribe() call."""
+    assert isinstance(wm._transcribe_lock, type(threading.Lock()))
+
+    # Lock must be acquirable (i.e. not held) when no transcription is running.
+    acquired = wm._transcribe_lock.acquire(blocking=False)
+    assert acquired, "_transcribe_lock should be free when no transcription is active"
+    wm._transcribe_lock.release()

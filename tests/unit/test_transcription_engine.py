@@ -1,7 +1,7 @@
 """
 tests/test_transcription_engine.py
 ===================================
-Unit tests for TranscriptionEngine — DR-098 to DR-127.
+Unit tests for TranscriptionEngine — DR-098 to DR-127, DR-214.
 
 All external dependencies are mocked:
   WhisperManager  → MagicMock injected via constructor
@@ -44,6 +44,7 @@ test_DR_124_assign_speakers_isolation_skipped_under_3_words  DR-124       F-17,F
 test_DR_125_assign_speakers_isolated_word_reassigned         DR-125       F-17,F-20      §3.3
 test_DR_126_assign_speakers_consecutive_words_merged         DR-126       F-17,F-20      §3.3
 test_DR_127_assign_speakers_new_block_on_speaker_change      DR-127       F-17,F-20      §3.3
+test_DR_214_run_diarization_returns_none_when_cancel_set     DR-214       F-14,F-15      §3.3,§4.1
 
 CI safety
 ---------
@@ -689,3 +690,45 @@ def test_DR_127_assign_speakers_new_block_on_speaker_change(engine):
     assert len(blocks) == 2
     assert blocks[0][1] == "SPEAKER_00"
     assert blocks[1][1] == "SPEAKER_01"
+
+
+# ============================================================================
+# DR-214  _run_diarization() — daemon thread polling cancellation
+# ============================================================================
+
+@pytest.mark.filesystem
+def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, tmp_path, monkeypatch):
+    """DR-214: If cancel_event is set before the pipeline daemon thread
+    completes, _run_diarization() returns None without waiting for it to finish."""
+    import threading as _threading
+
+    mono = np.ones(4096, dtype=np.float32)
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
+    _make_torch_mock(monkeypatch, cuda_available=False)
+
+    cancel_event = _threading.Event()
+
+    # Pipeline blocks indefinitely; cancel_event is set from the test thread.
+    pipeline_started = _threading.Event()
+
+    def slow_pipeline(inputs, batch_size=None):
+        pipeline_started.set()
+        # Block until the test is over (daemon thread, so it won't prevent exit)
+        _threading.Event().wait(timeout=30)
+        return MagicMock()
+
+    engine.pyannote.get_pipeline.return_value = slow_pipeline
+
+    wav = tmp_path / "audio.wav"
+    wav.touch()
+
+    # Set cancel_event only after the pipeline daemon thread has started.
+    def _set_cancel():
+        pipeline_started.wait(timeout=2)
+        cancel_event.set()
+
+    _threading.Thread(target=_set_cancel, daemon=True).start()
+
+    result = engine._run_diarization(wav, cancel_event=cancel_event)
+
+    assert result is None
