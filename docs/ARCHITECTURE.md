@@ -237,7 +237,7 @@ sequenceDiagram
     opt User cancels during transcription or diarization
         User->>GUI: Click "Cancel"
         GUI->>BG: Set cancel_event
-        Note right of BG: Transcription — consumer polls queue every ≤100 ms (CD §3.2 DR-213)
+        Note right of BG: Transcription — consumer polls queue every ≤100 ms; producer queue writes are cancellation-safe and cannot block indefinitely (CD §3.2 DR-213)
         Note right of BG: Diarization — daemon thread polled every ≤100 ms (CD §6.2 DR-214)
         ASR-->>TE: partial segments[] (within ≤100 ms of cancel)
         TE-->>BG: partial transcript.txt
@@ -362,7 +362,7 @@ sequenceDiagram
 
 > **Timestamp alignment**: each segment's `start` time is relative to the chunk slice passed to Whisper. The live pipeline records the `base_seconds` offset (`_live_processed_samples / SAMPLE_RATE`) alongside each segment. At merge time, `_OffsetSegment` adds the offset to produce absolute session timestamps.
 
-> **Cancellation and post-processing serialisation**: `_live_pipeline_stop_event` is passed as `cancel_event` to `whisper.transcribe()`, so an in-progress live transcription exits within ≤100 ms of Stop. `WhisperManager._transcribe_lock` ensures the post-processing tail transcription waits until the live thread has released the model.
+> **Cancellation and post-processing serialisation**: `_live_pipeline_stop_event` is passed as `cancel_event` to `whisper.transcribe()`, so an in-progress live transcription exits within ≤100 ms of Stop. The transcription producer/consumer handoff is cancellation-safe: queue writes must not block indefinitely after cancellation, and producer shutdown is guaranteed. `WhisperManager._transcribe_lock` ensures the post-processing tail transcription waits until the live thread has released the model.
 
 ### 3.7 Settings & Preferences Lifecycle
 
@@ -433,7 +433,7 @@ sequenceDiagram
 All background threads communicate with the UI exclusively via Qt signals. No background thread holds a direct reference to a UI widget. The `Signals` object is created on the main thread and passed to background operations. The `messagebox_requested` signal (CD §2.1) extends this pattern to allow background threads to trigger modal dialogs without touching Qt widgets directly. See CD §2.1 for the full signal inventory and CD §8.3 for slot wiring.
 
 **Responsive cancellation** uses two sub-patterns (see CD §3.2 DR-213 and CD §6.2 DR-214):
-- *Producer/consumer (transcription)*: the segment generator runs on a daemon thread feeding a `Queue(maxsize=1)`; the consumer polls with a 100 ms timeout so `cancel_event` is checked at that interval regardless of segment inference time.
+- *Producer/consumer (transcription)*: the segment generator runs on a daemon thread feeding a bounded queue with cancellation-safe, non-blocking enqueue semantics; the consumer polls with a 100 ms timeout so `cancel_event` is checked at that interval regardless of segment inference time, and producer termination cannot be stalled by a full queue after cancellation.
 - *Daemon-thread abandonment (diarization)*: the blocking pipeline call runs on a daemon thread; the caller polls a `threading.Event` every 100 ms and returns `None` immediately if cancelled, leaving the daemon to finish in the background.
 
 **Live pipeline thread safety** (see CD §3.2 DR-213 and CD §5.2 DR-219):
@@ -574,8 +574,8 @@ The **Architecture Ref** column contains section numbers within *this document*:
 | F-11 | Enable/disable transcription | MainWindow, TranscriptionEngine | §2.2, §3.3, §4.6 | DR-154, DR-161, DR-181, DR-200 |
 | F-12 | Transcription language selection | MainWindow | §2.2, §4.6 | DR-025, DR-162 |
 | F-13 | Supported languages (IT, EN, FR, auto) | MainWindow | §2.2, §4.6 | — |
-| F-14 | Cancel in-progress transcription | MainWindow, Signals | §3.3 | DR-027, DR-100, DR-101, DR-157, DR-159, DR-194, DR-196 |
-| F-15 | Partial transcript on cancellation | ASREngine, TranscriptionEngine | §3.3 | DR-027, DR-100, DR-101, DR-157, DR-159, DR-195 |
+| F-14 | Cancel in-progress transcription | MainWindow, Signals | §3.3 | DR-027, DR-100, DR-101, DR-157, DR-159, DR-194, DR-196, DR-213 |
+| F-15 | Partial transcript on cancellation | ASREngine, TranscriptionEngine | §3.3 | DR-027, DR-100, DR-101, DR-157, DR-159, DR-195, DR-213 |
 | F-16 | Transcribe a pre-existing WAV file | MainWindow, TranscriptionEngine | §3.5 | DR-158, DR-159, DR-160, DR-166 |
 | F-17 | Identify and label speakers | DiarizationEngine, TranscriptionEngine | §2.2, §3.3 | DR-056, DR-057, DR-102, DR-106, DR-107, DR-126, DR-127, DR-145, DR-146, DR-163, DR-178 |
 | F-18 | Enable/disable speaker identification | MainWindow | §2.2, §4.6 | DR-163, DR-182, DR-183 |

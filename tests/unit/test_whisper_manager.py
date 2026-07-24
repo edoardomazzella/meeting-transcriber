@@ -4,7 +4,7 @@ tests/test_whisper_manager.py
 Unit tests for WhisperManager — DR-017 to DR-028.
 
 All tests mock faster_whisper.WhisperModel via sys.modules so no GPU, no model
-files, and no internet access are required.  All 14 tests are CI-safe.
+files, and no internet access are required.  All 16 tests are CI-safe.
 
 Traceability matrix
 -------------------
@@ -25,6 +25,8 @@ test_DR_026_transcribe_returns_all_segments_no_cancel      DR-026      F-10     
 test_DR_027_transcribe_returns_partial_segments_on_cancel  DR-027      F-14, F-15  §3.3
 test_DR_028_transcribe_returns_empty_list_when_no_speech   DR-028      F-10        §3.3, §3.5
 test_DR_213_transcribe_lock_is_free_when_idle              DR-213      F-36, F-38  §3.6, §4.1
+test_DR_213_cancelled_transcribe_terminates_producer_thread DR-213     F-14, F-15  §3.3, §4.1
+test_DR_213_cancelled_transcribe_has_no_extra_threads      DR-213      F-14, F-15  §3.3, §4.1
 
 CI safety
 ---------
@@ -57,8 +59,10 @@ and CPU calls cleanly.
 """
 
 import logging
+import queue
 import sys
 import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -299,6 +303,79 @@ def test_DR_213_transcribe_lock_is_free_when_idle(wm):
     acquired = wm._transcribe_lock.acquire(blocking=False)
     assert acquired, "_transcribe_lock should be free when no transcription is active"
     wm._transcribe_lock.release()
+
+
+def test_DR_213_cancelled_transcribe_terminates_producer_thread(wm_loaded, monkeypatch):
+    """DR-213 (extended): cancellation must not leave the producer blocked.
+
+    The first dequeue sets cancel_event. With a bounded queue this can expose
+    producer-side blocking in enqueue/finalisation if shutdown is not handled
+    in a cancellation-safe way.
+    """
+    cancel_event = threading.Event()
+    seg1, seg2 = MagicMock(), MagicMock()
+
+    created_threads = []
+    real_thread_cls = threading.Thread
+
+    def _capture_thread(*args, **kwargs):
+        t = real_thread_cls(*args, **kwargs)
+        created_threads.append(t)
+        return t
+
+    monkeypatch.setattr(mt.threading, "Thread", _capture_thread)
+
+    real_get = queue.Queue.get
+    first_get = {"done": False}
+
+    def _patched_get(self, *args, **kwargs):
+        item = real_get(self, *args, **kwargs)
+        if not first_get["done"]:
+            first_get["done"] = True
+            cancel_event.set()
+        return item
+
+    monkeypatch.setattr(queue.Queue, "get", _patched_get)
+    wm_loaded.model.transcribe.return_value = (iter([seg1, seg2]), MagicMock())
+
+    result = wm_loaded.transcribe("dummy.wav", cancel_event=cancel_event)
+
+    assert result == [seg1]
+    assert created_threads, "Expected producer thread to be created"
+
+    producer = created_threads[0]
+    producer.join(timeout=0.3)
+    assert not producer.is_alive(), "Producer thread must terminate after cancel"
+
+
+def test_DR_213_cancelled_transcribe_has_no_extra_threads(wm_loaded, monkeypatch):
+    """DR-213 (extended): transcribe() should return without orphaned internal
+    producer threads after cancellation."""
+    cancel_event = threading.Event()
+    seg1, seg2 = MagicMock(), MagicMock()
+
+    real_get = queue.Queue.get
+    first_get = {"done": False}
+
+    def _patched_get(self, *args, **kwargs):
+        item = real_get(self, *args, **kwargs)
+        if not first_get["done"]:
+            first_get["done"] = True
+            cancel_event.set()
+        return item
+
+    monkeypatch.setattr(queue.Queue, "get", _patched_get)
+    wm_loaded.model.transcribe.return_value = (iter([seg1, seg2]), MagicMock())
+
+    before = {t.ident for t in threading.enumerate() if t.ident is not None}
+    result = wm_loaded.transcribe("dummy.wav", cancel_event=cancel_event)
+    assert result == [seg1]
+
+    time.sleep(0.15)
+
+    after = [t for t in threading.enumerate() if t.ident is not None]
+    leaked = [t for t in after if t.ident not in before and t.is_alive()]
+    assert leaked == [], "No producer thread should remain alive after cancel"
 
 
 # ============================================================================

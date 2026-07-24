@@ -283,17 +283,43 @@ class WhisperManager:
 
             _DONE = object()
             _q = _queue.Queue(maxsize=1)
+            _producer_stop = threading.Event()
+
+            def _offer(item):
+                """Put an item into the queue unless cancellation/stop is requested."""
+                while True:
+                    if _producer_stop.is_set() or (cancel_event and cancel_event.is_set()):
+                        return False
+                    try:
+                        _q.put(item, timeout=0.05)
+                        return True
+                    except _queue.Full:
+                        continue
+
+            def _signal_done():
+                """Always allow producer shutdown even if consumer has already exited."""
+                while True:
+                    try:
+                        _q.put(_DONE, timeout=0.05)
+                        return
+                    except _queue.Full:
+                        if _producer_stop.is_set() or (cancel_event and cancel_event.is_set()):
+                            try:
+                                _q.get_nowait()
+                            except _queue.Empty:
+                                pass
 
             def _producer():
                 try:
                     for seg in segments_gen:
-                        if cancel_event and cancel_event.is_set():
+                        if _producer_stop.is_set() or (cancel_event and cancel_event.is_set()):
                             break
-                        _q.put(seg)
+                        if not _offer(seg):
+                            break
                 except Exception as _exc:
-                    _q.put(_exc)
+                    _offer(_exc)
                 finally:
-                    _q.put(_DONE)
+                    _signal_done()
 
             _producer_thread = threading.Thread(target=_producer, daemon=True)
             _producer_thread.start()
@@ -304,15 +330,22 @@ class WhisperManager:
                     item = _q.get(timeout=0.1)
                 except _queue.Empty:
                     if cancel_event and cancel_event.is_set():
+                        _producer_stop.set()
                         break
                     continue
                 if item is _DONE:
                     break
                 if isinstance(item, Exception):
+                    _producer_stop.set()
                     raise item
                 result.append(item)
                 if cancel_event and cancel_event.is_set():
+                    _producer_stop.set()
                     break
+
+            if _producer_thread.is_alive():
+                _producer_stop.set()
+                _producer_thread.join(timeout=0.2)
 
             log.info("Transcription %s (%d segments)",
                      "cancelled" if (cancel_event and cancel_event.is_set()) else "completed",

@@ -248,7 +248,7 @@ Loads the Whisper model. First attempts CUDA (`float16`); on any failure falls b
 
 #### `transcribe(audio: str | Path | np.ndarray, language: str | None = None, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> list`
 
-Transcribes audio supplied as a file path or an in-memory numpy array. Iterates the segment generator and stops early if `cancel_event` is set.
+Transcribes audio supplied as a file path or an in-memory numpy array. Iterates the segment generator and stops early if `cancel_event` is set. Uses a cancellation-safe producer/consumer handoff so shutdown does not deadlock when cancellation occurs while the queue is full.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -270,7 +270,7 @@ Transcribes audio supplied as a file path or an in-memory numpy array. Iterates 
 | DR-027 | If `cancel_event` is signalled during iteration, transcription stops at the current segment and the partial list collected so far is returned. |
 | DR-028 | If the model produces no speech segments, an empty list is returned. |
 | DR-240 | If `audio` is a `numpy.ndarray`, it is passed directly to `WhisperModel.transcribe()` without any file I/O; if it is a file path (`str` or `Path`), the path is passed to the model as-is. |
-| DR-213 | All execution inside `transcribe()` is serialised under `self._transcribe_lock`; if a second thread calls `transcribe()` while the first is still running, it blocks until the lock is released. This prevents concurrent inference on the shared `WhisperModel` instance from the live pipeline thread and the post-processing thread. |
+| DR-213 | All execution inside `transcribe()` is serialised under `self._transcribe_lock`; if a second thread calls `transcribe()` while the first is still running, it blocks until the lock is released. This prevents concurrent inference on the shared `WhisperModel` instance from the live pipeline thread and the post-processing thread. The producer/consumer queue handoff must remain cancellation-safe: producer enqueue/finalisation steps must not block indefinitely after `cancel_event` is set, and producer termination must be guaranteed. |
 ---
 
 ## 4. Class: `PyannoteManager`
@@ -1730,7 +1730,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-017–DR-018 | is_installed() | F-26 | §3.1 |
 | DR-019–DR-023 | load() | F-26, NF-03, NF-04, NF-05 | §3.1, §4.5 |
 | DR-024–DR-028, DR-240 | transcribe() | F-10, F-12, F-14, F-15 | §3.3, §3.5, §4.8 |
-| DR-213 | transcribe() — lock serialisation | F-36, F-38 | §3.6, §4.1 |
+| DR-213 | transcribe() — lock serialisation + cancellation-safe producer/consumer shutdown | F-14, F-15, F-36, F-38 | §3.3, §3.6, §4.1 |
 
 ---
 
