@@ -69,6 +69,7 @@ test_DR_180_initial_load_restores_transcribe_when_whisper_ready  DR-180    F-11,
 test_DR_181_initial_load_leaves_transcribe_disabled_no_whisper   DR-181    F-11             §3.1
 test_DR_182_initial_load_restores_diarize_when_both_ready        DR-182    F-18,F-32        §3.1,§4.4
 test_DR_183_initial_load_leaves_diarize_disabled_no_model        DR-183    F-18             §3.1
+test_DR_251_start_enabled_after_initial_load_restores_transcription DR-251  F-11,F-42,NF-12  §3.1,§4.6
 test_DR_184_on_whisper_setup_yes_unblocks_with_true              DR-184    F-26             §3.1
 test_DR_185_on_whisper_setup_no_unblocks_with_false              DR-185    F-26             §3.1
 test_DR_186_on_pyannote_setup_accept_unblocks_with_true          DR-186    F-28,NF-05       §3.1,§3.4
@@ -694,10 +695,10 @@ def test_DR_152b_stop_recording_shows_install_whisper_when_missing(win, monkeypa
 
 @pytest.mark.qt
 def test_DR_153_process_recording_emits_error_on_save_wav_fail(win, tmp_path, monkeypatch):
-    """DR-153: If saving the audio to WAV fails, an error signal is emitted and
-    no transcription is attempted."""
+    """DR-153: If get_mixed_audio() raises RuntimeError, an error signal is emitted
+    and no transcription is attempted."""
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
-    win.recorder.save_wav = MagicMock(side_effect=RuntimeError("disk full"))
+    win.recorder.get_mixed_audio = MagicMock(side_effect=RuntimeError("disk full"))
 
     errors = []
     win.signals.error.connect(errors.append)
@@ -709,10 +710,14 @@ def test_DR_153_process_recording_emits_error_on_save_wav_fail(win, tmp_path, mo
 
 @pytest.mark.qt
 def test_DR_154_process_recording_emits_finished_when_no_transcribe(win, tmp_path, monkeypatch):
-    """DR-154: If enable_transcription is False, the WAV path is emitted as the
-    result immediately without calling the transcription engine."""
+    """DR-154: If enable_transcription is False (WAV saving enabled, F-42), the
+    WAV path is emitted via finished without calling the transcription engine."""
+    import numpy as np
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    fake_audio = np.zeros(1024, dtype=np.float32)
     fake_wav = tmp_path / "mixed.wav"
+    win.recorder.get_mixed_audio = MagicMock(return_value=fake_audio)
+    win.save_wav_checkbox.setChecked(True)
     win.recorder.save_wav = MagicMock(return_value=fake_wav)
     mock_process = MagicMock()
     win.engine.process = mock_process  # must not be called
@@ -730,8 +735,9 @@ def test_DR_154_process_recording_emits_finished_when_no_transcribe(win, tmp_pat
 @pytest.mark.qt
 def test_DR_155_process_recording_emits_error_on_engine_fail(win, tmp_path, monkeypatch):
     """DR-155: If the transcription engine raises, an error signal is emitted."""
+    import numpy as np
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
-    win.recorder.save_wav = MagicMock(return_value=tmp_path / "mixed.wav")
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, dtype=np.float32))
     win.engine.process = MagicMock(side_effect=RuntimeError("engine error"))
 
     errors = []
@@ -746,8 +752,9 @@ def test_DR_155_process_recording_emits_error_on_engine_fail(win, tmp_path, monk
 def test_DR_156_process_recording_emits_finished_on_success(win, tmp_path, monkeypatch):
     """DR-156: If transcription completes normally without cancellation, the
     transcript path is emitted via the finished signal."""
+    import numpy as np
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
-    win.recorder.save_wav = MagicMock(return_value=tmp_path / "mixed.wav")
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, dtype=np.float32))
     fake_transcript = tmp_path / "transcript.txt"
     win.engine.process = MagicMock(return_value=fake_transcript)
 
@@ -764,11 +771,12 @@ def test_DR_156_process_recording_emits_finished_on_success(win, tmp_path, monke
 def test_DR_157_process_recording_emits_cancelled_on_cancel(win, tmp_path, monkeypatch):
     """DR-157: If cancellation was requested during processing, a cancellation
     signal is emitted carrying the folder path if a partial transcript was saved."""
+    import numpy as np
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
-    win.recorder.save_wav = MagicMock(return_value=tmp_path / "mixed.wav")
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, dtype=np.float32))
     fake_transcript = tmp_path / "transcript.txt"
 
-    def engine_process(wav_arg, out_dir, lang, diarize, on_status=None, cancel_event=None):
+    def engine_process(audio_arg, out_dir, lang, diarize, on_status=None, cancel_event=None):
         if cancel_event is not None:
             cancel_event.set()
         return fake_transcript
@@ -959,11 +967,12 @@ def test_DR_167_update_controls_sources_locked_during_processing(win):
 
 @pytest.mark.qt
 def test_DR_168_source_toggled_enables_start_when_checked_and_idle(win):
-    """DR-168: If at least one source checkbox is checked and the app is idle,
-    the Start button is enabled."""
+    """DR-168: If at least one source and at least one output are enabled and
+    the app is idle, the Start button is enabled."""
     win.recording = False
     win._processing = False
     win.mic_checkbox.setChecked(True)
+    win.save_wav_checkbox.setChecked(True)  # ensure _outputs_enabled() returns True
 
     win._on_source_toggled()
 
@@ -1174,6 +1183,32 @@ def test_DR_183_initial_load_leaves_diarize_disabled_no_model(win):
     win._on_initial_load_complete()
 
     assert not win.diarization_checkbox.isChecked()
+
+
+@pytest.mark.qt
+def test_DR_251_start_enabled_after_initial_load_restores_transcription(win):
+    """DR-251: _update_controls() is the last step of _on_initial_load_complete(),
+    so the Start button is evaluated against the fully restored checkbox state.
+
+    Regression: previously, Start was set *before* transcribe was restored, leaving
+    it disabled even when transcription was saved as enabled."""
+    win.whisper_ready = True
+    win._whisper_loading = False
+    win._pyannote_loading = False
+    win._pending_settings = {"transcribe": True, "diarization": False,
+                              "save_wav": False}
+    win.mic_checkbox.setChecked(True)
+    win.save_wav_checkbox.setChecked(False)
+    # Simulate state just before initial_load_complete fires: transcribe disabled
+    win.transcribe_checkbox.setEnabled(False)
+    win.transcribe_checkbox.setChecked(False)
+
+    win._on_initial_load_complete()
+
+    assert win.transcribe_checkbox.isChecked(), \
+        "transcribe checkbox must be restored from pending_settings"
+    assert win.start_button.isEnabled(), \
+        "Start must be enabled once transcription (an output) is restored"
 
 
 # ============================================================================
@@ -1763,39 +1798,35 @@ def test_DR_222_run_live_pipeline_waits_for_enough_audio(win, tmp_path, monkeypa
 
 
 @pytest.mark.qt
-def test_DR_223_run_live_pipeline_calls_whisper_with_chunk_wav(win, tmp_path):
-    """DR-223: When enough audio is available, it is written to _live_chunk.wav
-    and passed to whisper.transcribe()."""
+def test_DR_223_run_live_pipeline_calls_whisper_with_numpy_array(win, tmp_path):
+    """DR-223: When enough audio is available, the numpy float32 slice is passed
+    directly to whisper.transcribe(); no temporary WAV file is created."""
     import numpy as np
 
     win._recording_output_dir = tmp_path
     win._live_processed_samples = 0
-    win._live_transcript_file = tmp_path / "transcript_live.txt"
-    win._live_transcript_file.write_text("", encoding="utf-8")
 
-    # Enough audio (well over chunk_samples) on first call; then stop.
     big_audio = np.zeros(int(mt.SAMPLE_RATE * mt.PIPELINE_CHUNK_SECONDS * 2), np.float32)
-    call_count = [0]
 
     def fake_get_mixed_since(start):
-        call_count[0] += 1
-        win._live_pipeline_stop_event.set()   # stop after first real cycle
+        win._live_pipeline_stop_event.set()
         return big_audio, len(big_audio)
 
     win.recorder.get_mixed_since = fake_get_mixed_since
 
-    transcribed_wavs = []
+    transcribed_arrays = []
 
-    def fake_transcribe(wav, **kw):
-        transcribed_wavs.append(Path(wav))
+    def fake_transcribe(audio, **kw):
+        transcribed_arrays.append(audio)
         return []
 
     win.whisper.transcribe = fake_transcribe
     win._live_pipeline_stop_event.clear()
     win._run_live_pipeline(language=None)
 
-    assert len(transcribed_wavs) == 1
-    assert transcribed_wavs[0].name == "_live_chunk.wav"
+    assert len(transcribed_arrays) == 1
+    assert isinstance(transcribed_arrays[0], np.ndarray)
+    assert not (tmp_path / "_live_chunk.wav").exists()
 
 
 @pytest.mark.qt
@@ -1862,12 +1893,25 @@ def test_DR_225_run_live_pipeline_updates_processed_samples(win, tmp_path):
 
 
 @pytest.mark.qt
-def test_DR_226_run_live_pipeline_deletes_temp_wav_on_exit(win, tmp_path):
-    """DR-226: When the loop exits, _live_chunk.wav is removed if it exists."""
+def test_DR_226_run_live_pipeline_no_temp_files_on_exit(win, tmp_path):
+    """DR-226: When the loop exits, the thread returns cleanly with no temporary
+    files to remove (no _live_chunk.wav is ever created)."""
     import numpy as np
 
     win._recording_output_dir = tmp_path
     win._live_processed_samples = 0
+
+    # Signal stop immediately without producing any audio
+    def fake_get_mixed_since(start):
+        win._live_pipeline_stop_event.set()
+        return np.zeros(0, np.float32), 0
+
+    win.recorder.get_mixed_since = fake_get_mixed_since
+    win.whisper.transcribe = MagicMock(return_value=[])
+    win._live_pipeline_stop_event.clear()
+    win._run_live_pipeline(language=None)
+
+    assert not (tmp_path / "_live_chunk.wav").exists()
     win._live_transcript_file = tmp_path / "transcript_live.txt"
     win._live_transcript_file.write_text("", encoding="utf-8")
 
@@ -2013,15 +2057,16 @@ def test_DR_230_stop_recording_calls_stop_live_pipeline(win, monkeypatch):
 
 @pytest.mark.qt
 def test_DR_231_process_recording_reuses_recording_output_dir(win, tmp_path, monkeypatch):
-    """DR-231: If _recording_output_dir is set (created at recording start),
-    that folder is reused; a new folder is NOT created."""
+    """DR-231: If _recording_output_dir is set, that folder is reused; a new
+    folder is NOT created."""
+    import numpy as np
     existing_dir = tmp_path / "existing_session"
     existing_dir.mkdir()
     win._recording_output_dir = existing_dir
 
-    fake_wav = existing_dir / "mixed.wav"
-    win.recorder.save_wav = MagicMock(return_value=fake_wav)
-    win.engine.process = MagicMock(return_value=fake_wav)
+    fake_audio = np.zeros(1024, dtype=np.float32)
+    win.recorder.get_mixed_audio = MagicMock(return_value=fake_audio)
+    win.engine.process = MagicMock(return_value=existing_dir / "transcript.txt")
 
     finished = []
     win.signals.finished.connect(lambda f, t: finished.append(f))
@@ -2030,7 +2075,6 @@ def test_DR_231_process_recording_reuses_recording_output_dir(win, tmp_path, mon
 
     assert len(finished) == 1
     assert finished[0] == str(existing_dir)
-    # No new folder should have been created inside tmp_path
     subdirs = [p for p in tmp_path.iterdir() if p.is_dir()]
     assert subdirs == [existing_dir]
 
@@ -2041,25 +2085,25 @@ def test_DR_231_process_recording_reuses_recording_output_dir(win, tmp_path, mon
 
 @pytest.mark.qt
 def test_DR_232_process_recording_calls_process_with_live_segments(win, tmp_path, monkeypatch):
-    """DR-232: If _live_transcribed_segments is non-empty when _process_recording
-    runs, _process_with_live_segments() is called instead of engine.process()."""
+    """DR-232: If _live_transcribed_segments is non-empty, _process_with_live_segments()
+    is called with the audio numpy array instead of engine.process()."""
     import numpy as np
 
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
-    fake_wav = tmp_path / "mixed.wav"
-    win.recorder.save_wav = MagicMock(return_value=fake_wav)
+    fake_audio = np.zeros(1024, dtype=np.float32)
+    win.recorder.get_mixed_audio = MagicMock(return_value=fake_audio)
 
     fake_seg = MagicMock()
     fake_seg.text = "hello"
     win._live_transcribed_segments = [(0.0, fake_seg)]
     win._live_processed_samples = 0
 
-    called_with_live = []
+    called_with = []
     fake_txt = tmp_path / "transcript.txt"
     fake_txt.write_text("", encoding="utf-8")
 
-    def fake_process_with_live(wav, out, lang, diar, pairs):
-        called_with_live.append(pairs)
+    def fake_process_with_live(audio, out, lang, diar, pairs):
+        called_with.append(audio)
         return fake_txt
 
     win._process_with_live_segments = fake_process_with_live
@@ -2070,86 +2114,82 @@ def test_DR_232_process_recording_calls_process_with_live_segments(win, tmp_path
 
     win._process_recording(None, True, False)
 
-    assert len(called_with_live) == 1
+    assert len(called_with) == 1
+    assert isinstance(called_with[0], np.ndarray)
     win.engine.process.assert_not_called()
 
 
 @pytest.mark.qt
-def test_DR_234_process_with_live_falls_back_on_wav_read_error(win, tmp_path, monkeypatch):
-    """DR-234: If sf.read raises when reading the full WAV, the method falls
-    back to engine.process() on the full audio."""
-    import soundfile as sf_real
-
-    monkeypatch.setattr(mt.sf, "read", MagicMock(side_effect=OSError("disk error")))
-
-    fake_txt = tmp_path / "transcript.txt"
-    win.engine.process = MagicMock(return_value=fake_txt)
-
-    live_pairs = [(0.0, MagicMock())]
-    result = win._process_with_live_segments(
-        tmp_path / "audio.wav", tmp_path, None, False, live_pairs
-    )
-
-    win.engine.process.assert_called_once()
-    assert result == fake_txt
-
-
-@pytest.mark.qt
-def test_DR_235_process_with_live_transcribes_tail_only(win, tmp_path, monkeypatch):
-    """DR-235: The tail (audio after _live_processed_samples) is written to a
-    temp WAV, transcribed, and the temp file is deleted afterwards."""
+def test_DR_234_process_with_live_uses_audio_shape_for_total_samples(win, tmp_path):
+    """DR-234: Total sample count is derived from audio.shape[0]; no file I/O
+    is performed to determine this value."""
     import numpy as np
 
-    tail_samples = int(mt.SAMPLE_RATE * 5)
-    full_audio = np.zeros(int(mt.SAMPLE_RATE * 10), dtype=np.float32)
-    win._live_processed_samples = int(mt.SAMPLE_RATE * 5)  # 5 s already covered
+    audio = np.zeros(int(mt.SAMPLE_RATE * 10), dtype=np.float32)
+    win._live_processed_samples = len(audio)  # all covered — no tail
 
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+    live_seg = MagicMock()
+    live_seg.text = "hello"
+    live_seg.start = 0.0
+    live_seg.end = 1.0
+    getattr(live_seg, "words", [])
 
-    written_wavs = []
-    original_sf_write = mt.sf.write
-
-    def spy_write(path, data, sr):
-        written_wavs.append((Path(path), len(data)))
-    monkeypatch.setattr(mt.sf, "write", spy_write)
-
-    win.whisper.transcribe = MagicMock(return_value=[])
     win.engine._save_transcript = MagicMock(return_value=tmp_path / "transcript.txt")
 
-    win._process_with_live_segments(
-        tmp_path / "audio.wav", tmp_path, None, False, [(0.0, MagicMock())]
-    )
+    result = win._process_with_live_segments(audio, tmp_path, None, False, [(0.0, live_seg)])
 
-    tail_writes = [p for p, n in written_wavs if p.name == "_tail.wav"]
-    assert len(tail_writes) == 1
-    # Temp file must have been deleted
-    assert not tail_writes[0].exists()
+    win.engine._save_transcript.assert_called_once()
+    assert result is not None
+    # No sf.read call should have happened (no WAV file needed)
+    assert not (tmp_path / "mixed.wav").exists()
 
 
 @pytest.mark.qt
-def test_DR_237_process_with_live_returns_none_when_no_speech(win, tmp_path, monkeypatch):
+def test_DR_235_process_with_live_transcribes_tail_numpy_slice(win, tmp_path):
+    """DR-235: The tail slice audio[_live_processed_samples:] is passed directly
+    to whisper.transcribe() as a numpy array; no temporary WAV file is created."""
+    import numpy as np
+
+    audio = np.zeros(int(mt.SAMPLE_RATE * 10), dtype=np.float32)
+    tail_start = int(mt.SAMPLE_RATE * 5)
+    win._live_processed_samples = tail_start
+
+    transcribed_arrays = []
+
+    def fake_transcribe(arr, **kw):
+        transcribed_arrays.append(arr)
+        return []
+
+    win.whisper.transcribe = fake_transcribe
+    win.engine._save_transcript = MagicMock(return_value=tmp_path / "transcript.txt")
+
+    win._process_with_live_segments(audio, tmp_path, None, False, [(0.0, MagicMock())])
+
+    assert len(transcribed_arrays) == 1
+    tail_expected_len = len(audio) - tail_start
+    assert len(transcribed_arrays[0]) == tail_expected_len
+    # No temp WAV file created
+    assert not list(tmp_path.glob("_tail.wav"))
+
+
+@pytest.mark.qt
+def test_DR_237_process_with_live_returns_none_when_no_speech(win, tmp_path):
     """DR-237: If the merged segment list is empty (no speech in live or tail),
     None is returned and no transcript file is written."""
     import numpy as np
 
-    full_audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
+    audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
     win._live_processed_samples = 0
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
-    monkeypatch.setattr(mt.sf, "write", MagicMock())
     win.whisper.transcribe = MagicMock(return_value=[])
 
-    # live_pairs contains a segment with blank text — should be filtered upstream
-    # Pass empty live_pairs to guarantee empty combined list.
-    result = win._process_with_live_segments(
-        tmp_path / "audio.wav", tmp_path, None, False, []
-    )
+    result = win._process_with_live_segments(audio, tmp_path, None, False, [])
 
     assert result is None
     assert not (tmp_path / "transcript.txt").exists()
 
 
 @pytest.mark.qt
-def test_DR_238_process_with_live_no_diarization_returns_transcript(win, tmp_path, monkeypatch):
+def test_DR_238_process_with_live_no_diarization_returns_transcript(win, tmp_path):
     """DR-238: If diarization is disabled, only transcript.txt is produced and
     engine._run_diarization() is never called."""
     import numpy as np
@@ -2160,39 +2200,33 @@ def test_DR_238_process_with_live_no_diarization_returns_transcript(win, tmp_pat
     seg.end = 1.0
     getattr(seg, "words", [])
 
-    full_audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
-    win._live_processed_samples = len(full_audio)  # no tail
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+    audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
+    win._live_processed_samples = len(audio)  # no tail
 
     expected_txt = tmp_path / "transcript.txt"
     win.engine._save_transcript = MagicMock(return_value=expected_txt)
     win.engine._run_diarization = MagicMock()
 
-    result = win._process_with_live_segments(
-        tmp_path / "audio.wav", tmp_path, None,
-        enable_diarization=False,
-        live_pairs=[(0.0, seg)],
-    )
+    result = win._process_with_live_segments(audio, tmp_path, None, False, [(0.0, seg)])
 
     assert result == expected_txt
     win.engine._run_diarization.assert_not_called()
 
 
 @pytest.mark.qt
-def test_DR_239_process_with_live_diarizes_full_wav(win, tmp_path, monkeypatch):
+def test_DR_239_process_with_live_diarizes_full_audio_array(win, tmp_path):
     """DR-239: If diarization is enabled, engine._run_diarization() is called
-    on the full WAV and _save_diarized_transcript() is called with the merged
-    _OffsetSegment list."""
+    with the full audio numpy array (not a WAV path)."""
     import numpy as np
 
     seg = MagicMock()
     seg.text = "hello"
     seg.start = 0.0
     seg.end = 1.0
+    getattr(seg, "words", [])
 
-    full_audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
-    win._live_processed_samples = len(full_audio)  # no tail
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(full_audio, mt.SAMPLE_RATE)))
+    audio = np.zeros(int(mt.SAMPLE_RATE * 5), dtype=np.float32)
+    win._live_processed_samples = len(audio)  # no tail
 
     fake_txt = tmp_path / "transcript.txt"
     fake_diarized = tmp_path / "transcript_diarized.txt"
@@ -2200,15 +2234,133 @@ def test_DR_239_process_with_live_diarizes_full_wav(win, tmp_path, monkeypatch):
     win.engine._run_diarization = MagicMock(return_value=MagicMock())
     win.engine._save_diarized_transcript = MagicMock(return_value=fake_diarized)
 
-    wav = tmp_path / "audio.wav"
     result = win._process_with_live_segments(
-        wav, tmp_path, None,
+        audio, tmp_path, None,
         enable_diarization=True,
         live_pairs=[(0.0, seg)],
     )
 
-    win.engine._run_diarization.assert_called_once()
-    # First positional arg must be the full WAV, not the tail
-    assert win.engine._run_diarization.call_args[0][0] == wav
-    win.engine._save_diarized_transcript.assert_called_once()
     assert result == fake_diarized
+    win.engine._run_diarization.assert_called_once()
+    # First positional arg must be the full audio numpy array (not a WAV path)
+    diar_arg = win.engine._run_diarization.call_args[0][0]
+    import numpy as np
+    assert isinstance(diar_arg, np.ndarray)
+    win.engine._save_diarized_transcript.assert_called_once()
+
+
+# ============================================================================
+# DR-245 to DR-250  WAV saving checkbox, _outputs_enabled, _on_wav_save_toggled
+# ============================================================================
+
+@pytest.mark.qt
+def test_DR_245_process_recording_saves_wav_when_checkbox_enabled(win, tmp_path, monkeypatch):
+    """DR-245: If WAV saving is enabled, save_wav() is called with the audio
+    array after get_mixed_audio() returns."""
+    import numpy as np
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    fake_audio = np.zeros(1024, dtype=np.float32)
+    fake_wav = tmp_path / "mixed.wav"
+    win.recorder.get_mixed_audio = MagicMock(return_value=fake_audio)
+    win.recorder.save_wav = MagicMock(return_value=fake_wav)
+    win.engine.process = MagicMock(return_value=tmp_path / "transcript.txt")
+    win.save_wav_checkbox.setChecked(True)
+
+    win._process_recording(None, True, False)
+
+    win.recorder.save_wav.assert_called_once()
+    call_args = win.recorder.save_wav.call_args
+    assert call_args.args[1] is fake_audio  # audio array passed positionally
+
+
+@pytest.mark.qt
+def test_DR_245_process_recording_no_wav_when_checkbox_disabled(win, tmp_path, monkeypatch):
+    """DR-245: If WAV saving is disabled, save_wav() is never called."""
+    import numpy as np
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, np.float32))
+    win.recorder.save_wav = MagicMock()
+    win.engine.process = MagicMock(return_value=tmp_path / "transcript.txt")
+    win.save_wav_checkbox.setChecked(False)
+
+    win._process_recording(None, True, False)
+
+    win.recorder.save_wav.assert_not_called()
+
+
+@pytest.mark.qt
+def test_DR_246_process_recording_emits_error_when_save_wav_fails(win, tmp_path, monkeypatch):
+    """DR-246: If WAV saving is enabled and save_wav() raises, an error signal
+    is emitted and no transcription is attempted."""
+    import numpy as np
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, np.float32))
+    win.recorder.save_wav = MagicMock(side_effect=RuntimeError("disk full"))
+    win.engine.process = MagicMock()
+    win.save_wav_checkbox.setChecked(True)
+
+    errors = []
+    win.signals.error.connect(errors.append)
+    win._process_recording(None, True, False)
+
+    assert len(errors) == 1
+    win.engine.process.assert_not_called()
+
+
+@pytest.mark.qt
+def test_DR_247_save_wav_checkbox_locked_during_processing(win):
+    """DR-247: The WAV saving checkbox is enabled in Idle and locked during
+    Recording / Processing states."""
+    win._processing = False
+    win.recording = False
+    win._update_controls()
+    assert win.save_wav_checkbox.isEnabled()
+
+    win._processing = True
+    win._update_controls()
+    assert not win.save_wav_checkbox.isEnabled()
+
+
+@pytest.mark.qt
+def test_DR_248_outputs_enabled_true_when_transcribe_checked(win):
+    """DR-248: _outputs_enabled() returns True when the transcription checkbox
+    is checked (requires whisper_ready so _update_controls() doesn't reset it)."""
+    win.whisper_ready = True
+    win._whisper_loading = False
+    win.transcribe_checkbox.setEnabled(True)
+    win.transcribe_checkbox.setChecked(True)
+    win.save_wav_checkbox.setChecked(False)
+
+    assert win._outputs_enabled() is True
+
+
+@pytest.mark.qt
+def test_DR_249_outputs_enabled_false_when_neither_checked(win):
+    """DR-249: _outputs_enabled() returns False when neither the transcription
+    nor the WAV saving checkbox is checked."""
+    win.transcribe_checkbox.setChecked(False)
+    win.save_wav_checkbox.setChecked(False)
+
+    assert win._outputs_enabled() is False
+
+
+@pytest.mark.qt
+def test_DR_248_outputs_enabled_true_when_wav_checked(win):
+    """DR-248: _outputs_enabled() returns True when only the WAV saving checkbox
+    is checked."""
+    win.transcribe_checkbox.setChecked(False)
+    win.save_wav_checkbox.setChecked(True)
+
+    assert win._outputs_enabled() is True
+
+
+@pytest.mark.qt
+def test_DR_250_on_wav_save_toggled_calls_update_controls(win, monkeypatch):
+    """DR-250: _on_wav_save_toggled() calls _update_controls() to refresh the
+    Start button and WAV saving checkbox states."""
+    calls = []
+    monkeypatch.setattr(win, "_update_controls", lambda: calls.append(1))
+
+    win._on_wav_save_toggled(True)
+
+    assert len(calls) == 1

@@ -299,3 +299,36 @@ def test_DR_213_transcribe_lock_is_free_when_idle(wm):
     acquired = wm._transcribe_lock.acquire(blocking=False)
     assert acquired, "_transcribe_lock should be free when no transcription is active"
     wm._transcribe_lock.release()
+
+
+# ============================================================================
+# DR-240  transcribe() — numpy array input
+# ============================================================================
+
+def test_DR_240_transcribe_accepts_numpy_array_directly(wm_loaded):
+    """DR-240: If audio is a numpy.ndarray, it is passed directly to
+    WhisperModel.transcribe() without any file I/O (no str() conversion)."""
+    import numpy as np
+
+    audio = np.ones(mt.SAMPLE_RATE, dtype=np.float32) * 0.5
+    wm_loaded.model.transcribe.return_value = (iter([]), MagicMock())
+
+    wm_loaded.transcribe(audio)
+
+    call_kwargs = wm_loaded.model.transcribe.call_args.kwargs
+    # The numpy array must be passed as-is, not converted to str
+    assert call_kwargs["audio"] is audio
+    assert not isinstance(call_kwargs["audio"], str)
+
+
+def test_DR_240_transcribe_converts_path_to_str(wm_loaded, tmp_path):
+    """DR-240: If audio is a file path, it is converted to str before being
+    passed to WhisperModel.transcribe()."""
+    wav = tmp_path / "test.wav"
+    wav.touch()
+    wm_loaded.model.transcribe.return_value = (iter([]), MagicMock())
+
+    wm_loaded.transcribe(str(wav))
+
+    call_kwargs = wm_loaded.model.transcribe.call_args.kwargs
+    assert isinstance(call_kwargs["audio"], str)

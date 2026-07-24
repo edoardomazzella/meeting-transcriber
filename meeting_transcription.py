@@ -80,6 +80,7 @@ _SETTINGS_DEFAULTS = {
     "language":        None,
     "mic_device":      None,
     "speaker_device":  None,
+    "save_wav":        False,
 }
 
 def _load_settings():
@@ -259,21 +260,22 @@ class WhisperManager:
             log.error("Whisper CPU load failed: %s", e, exc_info=True)
             raise RuntimeError(message or f"Unable to load the Whisper model.\n\n{e}")
 
-    def transcribe(self, wav, language=None, on_status=None, cancel_event=None):
-        """Transcribe a wav file. Returns a list of segments (may be partial if cancelled).
+    def transcribe(self, audio, language=None, on_status=None, cancel_event=None):
+        """Transcribe audio (file path or numpy float32 array).
 
-        The segment generator runs on a dedicated producer thread so that
-        cancel_event is polled every ≤100 ms via a queue timeout, making
-        cancellation responsive even when the model is mid-inference on a
-        long audio chunk.
+        Accepts a path-like or a numpy.ndarray (float32, mono, SAMPLE_RATE Hz).
+        Returns a list of segments (may be partial if cancelled).
         """
         import queue as _queue
 
         with self._transcribe_lock:
             if on_status:
                 on_status("Transcribing...")
-            log.info("Transcription started (wav=%s, language=%s, vad=%s)", wav, language or "auto", VAD)
-            args = dict(audio=str(wav), beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True,
+            audio_input = audio if isinstance(audio, np.ndarray) else str(audio)
+            log.info("Transcription started (audio=%s, language=%s, vad=%s)",
+                     "<array>" if isinstance(audio, np.ndarray) else audio,
+                     language or "auto", VAD)
+            args = dict(audio=audio_input, beam_size=BEAM_SIZE, vad_filter=VAD, word_timestamps=True,
                         condition_on_previous_text=False, temperature=0, chunk_length=CHUNK_LENGTH)
             if language:
                 args["language"] = language
@@ -487,8 +489,8 @@ class AudioRecorder:
     def mute_mic(self, muted: bool):
         self._mic_muted = muted
 
-    def save_wav(self, output_dir, on_status=None):
-        """Validate, mix, and save recorded audio. Returns the wav Path."""
+    def get_mixed_audio(self, on_status=None):
+        """Validate captures, mix/normalise in memory, clear buffers, return float32 array."""
         errors = []
         if self._enable_speaker:
             if self.speaker_error:
@@ -508,8 +510,14 @@ class AudioRecorder:
         with self._chunks_lock:
             self._speaker_chunks.clear()
             self._mic_chunks.clear()
+        return mixed
+
+    def save_wav(self, output_dir, audio, on_status=None):
+        """Write a pre-mixed float32 array to mixed.wav in output_dir. Returns the Path."""
+        if on_status:
+            on_status("Saving audio...")
         wav = Path(output_dir) / "mixed.wav"
-        sf.write(str(wav), mixed, self.sample_rate)
+        sf.write(str(wav), audio, self.sample_rate, subtype="PCM_16")
         return wav
 
     def get_mixed_since(self, start_sample=0):
@@ -678,9 +686,9 @@ class TranscriptionEngine:
         self.whisper = whisper
         self.pyannote = pyannote
 
-    def process(self, wav, output_dir, language, enable_diarization, on_status=None, cancel_event=None):
-        """Transcribe and optionally diarize. Returns the path to the output file."""
-        segments = self.whisper.transcribe(wav, language, on_status, cancel_event)
+    def process(self, audio, output_dir, language, enable_diarization, on_status=None, cancel_event=None):
+        """Transcribe and optionally diarize. audio may be a numpy array or a file Path."""
+        segments = self.whisper.transcribe(audio, language, on_status, cancel_event)
         if not segments:
             return None
         txt = self._save_transcript(segments, output_dir)
@@ -690,9 +698,9 @@ class TranscriptionEngine:
             on_status("Running speaker diarization...")
         run_params = inspect.signature(self._run_diarization).parameters
         if "cancel_event" in run_params:
-            speaker_segments = self._run_diarization(wav, cancel_event=cancel_event)
+            speaker_segments = self._run_diarization(audio, cancel_event=cancel_event)
         else:
-            speaker_segments = self._run_diarization(wav)
+            speaker_segments = self._run_diarization(audio)
         if speaker_segments is None or (cancel_event and cancel_event.is_set()):
             return txt
         return self._save_diarized_transcript(segments, speaker_segments, output_dir)
@@ -705,22 +713,29 @@ class TranscriptionEngine:
                     f.write(f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n")
         return txt
 
-    def _run_diarization(self, wav, on_status=None, cancel_event=None):
-        """Run speaker diarization. Returns the Annotation, or None if cancelled.
+    def _run_diarization(self, audio, on_status=None, cancel_event=None):
+        """Run speaker diarization.
 
-        The pipeline call runs in a daemon thread; cancel_event is polled
-        every ≤100 ms so the caller is unblocked without waiting for the
-        (potentially multi-minute) pipeline to complete.
+        Accepts a numpy float32 array (post-recording) or a Path/str (WAV-file
+        transcription). Returns the Annotation, or None if cancelled.
         """
         import torch
-        log.info("Diarization started (wav=%s)", wav)
-        waveform, sr = sf.read(str(wav), dtype="float32")
-        if waveform.ndim == 1:
-            waveform = waveform[np.newaxis, :]
+        if isinstance(audio, np.ndarray):
+            # In-memory path: convert directly (DR-106)
+            log.info("Diarization started (in-memory, %d samples)", len(audio))
+            waveform = torch.from_numpy(audio).unsqueeze(0)  # [1, N]
+            sr = SAMPLE_RATE
         else:
-            waveform = waveform.T
+            # File-path: load with soundfile (DR-107)
+            log.info("Diarization started (wav=%s)", audio)
+            waveform, sr = sf.read(str(audio), dtype="float32")
+            if waveform.ndim == 1:
+                waveform = waveform[np.newaxis, :]   # mono -> [1, N]
+            else:
+                waveform = waveform.T                # multi-channel -> [C, N]
+            waveform = torch.from_numpy(waveform)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        waveform = torch.from_numpy(waveform).to(device)
+        waveform = waveform.to(device)
         if on_status:
             on_status("Running speaker diarization...")
 
@@ -997,7 +1012,7 @@ class MainWindow(QWidget):
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle(f"Meeting Transcriber v{__version__}")
-        self.setFixedSize(400, 580)
+        self.setFixedSize(400, 610)
         self._setup_ui()
         self._pending_settings = _load_settings()
         self._apply_settings(self._pending_settings)
@@ -1042,6 +1057,9 @@ class MainWindow(QWidget):
         self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
         self.diarization_checkbox = QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setEnabled(False)
+        self.save_wav_checkbox = QCheckBox("Save audio (WAV)")
+        self.save_wav_checkbox.setEnabled(False)
+        self.save_wav_checkbox.toggled.connect(self._on_wav_save_toggled)
         self.mic_checkbox = QCheckBox("Microphone")
         self.mic_checkbox.setChecked(True)
         self.speaker_checkbox = QCheckBox("Speaker (loopback)")
@@ -1139,6 +1157,7 @@ class MainWindow(QWidget):
         left_col = QVBoxLayout()
         left_col.addWidget(self.transcribe_checkbox)
         left_col.addWidget(self.diarization_checkbox)
+        left_col.addWidget(self.save_wav_checkbox)
         right_col = QVBoxLayout()
         right_col.setSpacing(3)
         right_col.addWidget(self.mic_checkbox)
@@ -1247,7 +1266,6 @@ class MainWindow(QWidget):
 
     def _on_initial_load_complete(self):
         self.progress_bar.setVisible(False)
-        self.start_button.setEnabled(self._sources_enabled())
         if self.whisper_ready:
             self.transcribe_checkbox.setChecked(self._pending_settings["transcribe"])
         if self.whisper_ready and self.pyannote_ready:
@@ -1257,11 +1275,12 @@ class MainWindow(QWidget):
     def _sources_enabled(self):
         return self.mic_checkbox.isChecked() or self.speaker_checkbox.isChecked()
 
+    def _outputs_enabled(self):
+        """True if at least one output is enabled (transcription or WAV saving)."""
+        return self.transcribe_checkbox.isChecked() or self.save_wav_checkbox.isChecked()
+
     def _on_source_toggled(self):
-        unlocked = not self.recording and not self._processing
-        self.start_button.setEnabled(self._sources_enabled() and unlocked)
-        self.mic_combo.setEnabled(self.mic_checkbox.isChecked() and unlocked)
-        self.speaker_combo.setEnabled(self.speaker_checkbox.isChecked() and unlocked)
+        self._update_controls()
 
     def _update_controls(self):
         if not self.whisper_ready:
@@ -1300,6 +1319,14 @@ class MainWindow(QWidget):
         self.speaker_checkbox.setEnabled(sources_unlocked)
         self.mic_combo.setEnabled(sources_unlocked and self.mic_checkbox.isChecked())
         self.speaker_combo.setEnabled(sources_unlocked and self.speaker_checkbox.isChecked())
+        # WAV saving checkbox: enabled in Idle, locked otherwise (DR-247)
+        self.save_wav_checkbox.setEnabled(sources_unlocked)
+        # Start button: enabled only when idle with ≥1 source and ≥1 output (F-42)
+        self.start_button.setEnabled(
+            sources_unlocked
+            and self._sources_enabled()
+            and self._outputs_enabled()
+        )
 
     def _on_install_whisper_clicked(self):
         self._whisper_installing = True
@@ -1374,6 +1401,9 @@ class MainWindow(QWidget):
     def _on_transcribe_toggled(self, checked):
         self._update_controls()
 
+    def _on_wav_save_toggled(self, checked):
+        self._update_controls()
+
     def _update_duration(self):
         if self.recording and self.start_time:
             e=int(time.monotonic()-self.start_time)
@@ -1443,7 +1473,6 @@ class MainWindow(QWidget):
         if not self._recording_output_dir:
             return
         chunk_samples = max(int(SAMPLE_RATE * PIPELINE_CHUNK_SECONDS), SAMPLE_RATE)
-        live_chunk_wav = self._recording_output_dir / "_live_chunk.wav"
 
         while not self._live_pipeline_stop_event.is_set():
             audio, total_samples = self.recorder.get_mixed_since(self._live_processed_samples)
@@ -1452,9 +1481,9 @@ class MainWindow(QWidget):
                 continue
 
             try:
-                sf.write(str(live_chunk_wav), audio, SAMPLE_RATE)
+                # Pass numpy slice directly — no temp WAV file (DR-223)
                 segments = self.whisper.transcribe(
-                    live_chunk_wav,
+                    audio,
                     language=language,
                     on_status=None,
                     cancel_event=self._live_pipeline_stop_event,
@@ -1472,12 +1501,7 @@ class MainWindow(QWidget):
             n_pre = round(total_samples / SAMPLE_RATE)
             self.signals.status_changed.emit(f"Recording... ({n_pre} s pre-transcribed)")
             self._live_processed_samples = total_samples
-
-        try:
-            if live_chunk_wav.exists():
-                live_chunk_wav.unlink()
-        except Exception:
-            log.debug("Could not remove temporary live chunk wav", exc_info=True)
+        # No temp files to clean up (DR-226)
 
     def _stop_live_pipeline(self):
         self._live_pipeline_stop_event.set()
@@ -1562,11 +1586,24 @@ class MainWindow(QWidget):
                 d = OUTPUT_DIR / ts
             d.mkdir(exist_ok=True)
 
-            wav = self.recorder.save_wav(d, self.signals.status_changed.emit)
+            # Mix and normalise captured audio in memory (DR-153)
+            audio = self.recorder.get_mixed_audio(self.signals.status_changed.emit)
+
+            # Optionally persist to WAV on disk (DR-245, F-40)
+            wav_path = None
+            if self.save_wav_checkbox.isChecked():
+                try:
+                    wav_path = self.recorder.save_wav(d, audio, self.signals.status_changed.emit)
+                except Exception as e:
+                    log.error("save_wav failed: %s", e, exc_info=True)
+                    self.signals.error.emit(str(e))
+                    self._recording_output_dir = None
+                    return
 
             if not enable_transcription:
+                # WAV saving must be enabled (F-42 guarantee)
                 self.signals.status_changed.emit("Completed")
-                self.signals.finished.emit(str(d), str(wav))
+                self.signals.finished.emit(str(d), str(wav_path) if wav_path else "")
                 return
 
             # Snapshot and clear live segments; use fast path if any were collected.
@@ -1575,11 +1612,11 @@ class MainWindow(QWidget):
 
             if live_pairs:
                 result_file = self._process_with_live_segments(
-                    wav, d, language, enable_diarization, live_pairs,
+                    audio, d, language, enable_diarization, live_pairs,
                 )
             else:
                 result_file = self.engine.process(
-                    wav, d, language, enable_diarization,
+                    audio, d, language, enable_diarization,
                     self.signals.status_changed.emit,
                     self._cancel_event,
                 )
@@ -1594,53 +1631,33 @@ class MainWindow(QWidget):
             self.signals.error.emit(str(e))
             self._recording_output_dir = None
 
-    def _process_with_live_segments(self, wav, output_dir, language,
+    def _process_with_live_segments(self, audio, output_dir, language,
                                      enable_diarization, live_pairs):
-        """Fast post-processing path: transcribe only the audio tail that the
-        live pipeline had not yet reached, then merge with pre-transcribed
-        segments to produce the final transcript.
+        """Fast post-processing path using pre-transcribed live segments.
 
-        `live_pairs` is a list of (base_seconds, Segment) tuples collected by
-        the live pipeline.  `self._live_processed_samples` holds the total
-        number of samples already covered by those segments.
+        `audio` is the full session float32 numpy array from get_mixed_audio().
+        `live_pairs` is a list of (base_seconds, Segment) collected by the
+        live pipeline. `self._live_processed_samples` holds the sample count
+        already covered by those segments.
         """
-        # Read the full WAV once to know total length and extract the tail.
-        try:
-            full_audio, _ = sf.read(str(wav), dtype="float32")
-        except Exception as e:
-            log.warning("Could not read WAV for tail extraction; "
-                        "falling back to full transcription: %s", e)
-            return self.engine.process(
-                wav, output_dir, language, enable_diarization,
-                self.signals.status_changed.emit, self._cancel_event,
-            )
-
-        total_samples = len(full_audio) if full_audio.ndim == 1 else full_audio.shape[0]
-        tail_start    = self._live_processed_samples
-        tail_base_s   = tail_start / SAMPLE_RATE
+        total_samples = audio.shape[0] if audio.ndim > 1 else len(audio)
+        tail_start  = self._live_processed_samples
+        tail_base_s = tail_start / SAMPLE_RATE
 
         tail_segments = []
         if tail_start < total_samples and not self._cancel_event.is_set():
-            tail_audio = full_audio[tail_start:] if full_audio.ndim == 1 \
-                         else full_audio[tail_start:, :]
-            tail_wav = Path(output_dir) / "_tail.wav"
+            tail_audio = audio[tail_start:] if audio.ndim == 1 else audio[tail_start:, :]
+            if audio.ndim > 1:
+                # _mix_streams expects mono; mix to mono if somehow multi-channel
+                tail_audio = np.mean(tail_audio, axis=1).astype(np.float32)
             try:
-                sf.write(str(tail_wav), tail_audio, SAMPLE_RATE)
                 self.signals.status_changed.emit("Transcribing remaining audio...")
                 tail_segments = self.whisper.transcribe(
-                    tail_wav, language=language,
+                    tail_audio, language=language,
                     on_status=None, cancel_event=self._cancel_event,
                 )
             except Exception as e:
                 log.warning("Tail transcription failed; transcript may be incomplete: %s", e)
-            finally:
-                try:
-                    if tail_wav.exists():
-                        tail_wav.unlink()
-                except Exception:
-                    pass
-
-        del full_audio
 
         # Build combined segment list with absolute timestamps.
         all_segs = [_OffsetSegment(seg, base_s) for base_s, seg in live_pairs]
@@ -1655,7 +1672,7 @@ class MainWindow(QWidget):
             return txt
 
         self.signals.status_changed.emit("Running speaker diarization...")
-        speaker_segments = self.engine._run_diarization(wav, cancel_event=self._cancel_event)
+        speaker_segments = self.engine._run_diarization(audio, cancel_event=self._cancel_event)
         if speaker_segments is None or self._cancel_event.is_set():
             return txt
         return self.engine._save_diarized_transcript(all_segs, speaker_segments, output_dir)
@@ -1669,7 +1686,6 @@ class MainWindow(QWidget):
         self.progress_bar.setVisible(False)
         self.cancel_button.setVisible(False)
         self.duration_label.setText("00:00:00")
-        self.start_button.setEnabled(self._sources_enabled())
         self._processing = False
         self._update_controls()
         if folder:
@@ -1682,7 +1698,6 @@ class MainWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.status_label.setText("Completed")
         self.duration_label.setText("00:00:00")
-        self.start_button.setEnabled(self._sources_enabled())
         self.stop_button.setEnabled(False)
         self._processing = False
         self._update_controls()
@@ -1701,7 +1716,6 @@ class MainWindow(QWidget):
         self.cancel_button.setVisible(False)
         self.status_label.setText("Error")
         self.duration_label.setText("00:00:00")
-        self.start_button.setEnabled(self._sources_enabled())
         self.stop_button.setEnabled(False)
         self._processing = False
         self._update_controls()
@@ -1725,6 +1739,7 @@ class MainWindow(QWidget):
             "language":        self.language_combo.currentData(),
             "mic_device":      self.mic_combo.currentData(),
             "speaker_device":  self.speaker_combo.currentData(),
+            "save_wav":        self.save_wav_checkbox.isChecked(),
         }
         try:
             with open(_SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -1737,6 +1752,7 @@ class MainWindow(QWidget):
         self.diarization_checkbox.setChecked(s["diarization"])
         self.mic_checkbox.setChecked(s["mic_enabled"])
         self.speaker_checkbox.setChecked(s["speaker_enabled"])
+        self.save_wav_checkbox.setChecked(s.get("save_wav", False))
         _combo_set_data(self.language_combo, s["language"])
         _combo_set_data(self.mic_combo, s["mic_device"])
         _combo_set_data(self.speaker_combo, s["speaker_device"])

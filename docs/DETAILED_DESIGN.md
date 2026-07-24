@@ -47,6 +47,7 @@ _SETTINGS_DEFAULTS = {
     "language":        None,
     "mic_device":      None,
     "speaker_device":  None,
+    "save_wav":        False,
 }
 ```
 
@@ -245,13 +246,13 @@ Loads the Whisper model. First attempts CUDA (`float16`); on any failure falls b
 | DR-023 | If both GPU and CPU loading fail, a `RuntimeError` is raised with a user-readable error message. |
 ---
 
-#### `transcribe(wav: str | Path, language: str | None = None, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> list`
+#### `transcribe(audio: str | Path | np.ndarray, language: str | None = None, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> list`
 
-Transcribes a WAV file. Iterates the segment generator and stops early if `cancel_event` is set.
+Transcribes audio supplied as a file path or an in-memory numpy array. Iterates the segment generator and stops early if `cancel_event` is set.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `wav` | `str \| Path` | Path to the WAV file |
+| `audio` | `str \| Path \| np.ndarray` | Path to a WAV file, or a `float32` numpy array (mono, `SAMPLE_RATE` Hz) |
 | `language` | `str \| None` | BCP-47 language code (e.g. `"it"`, `"en"`); `None` = auto-detect |
 | `on_status` | `callable \| None` | Called with `"Transcribing..."` before starting |
 | `cancel_event` | `threading.Event \| None` | If set during iteration, transcription stops and partial results are returned |
@@ -268,6 +269,7 @@ Transcribes a WAV file. Iterates the segment generator and stops early if `cance
 | DR-026 | If `cancel_event` is not provided or is never signalled, transcription runs to completion and all segments are returned. |
 | DR-027 | If `cancel_event` is signalled during iteration, transcription stops at the current segment and the partial list collected so far is returned. |
 | DR-028 | If the model produces no speech segments, an empty list is returned. |
+| DR-240 | If `audio` is a `numpy.ndarray`, it is passed directly to `WhisperModel.transcribe()` without any file I/O; if it is a file path (`str` or `Path`), the path is passed to the model as-is. |
 | DR-213 | All execution inside `transcribe()` is serialised under `self._transcribe_lock`; if a second thread calls `transcribe()` while the first is still running, it blocks until the lock is released. This prevents concurrent inference on the shared `WhisperModel` instance from the live pipeline thread and the post-processing thread. |
 ---
 
@@ -508,16 +510,15 @@ Toggles microphone muting. Thread-safe (single boolean write under the GIL).
 | DR-070 | If `muted` is `False`, subsequent microphone capture resumes real audio. |
 ---
 
-#### `save_wav(output_dir: str | Path, on_status: Callable | None = None) -> Path`
+#### `get_mixed_audio(on_status: Callable | None = None) -> np.ndarray`
 
-Validates captured audio, mixes streams, normalises, and writes a WAV file.
+Validates captured audio, mixes streams in memory, normalises, and returns the result as a `float32` numpy array. Clears internal audio buffers after mixing to free memory.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `output_dir` | `str \| Path` | Directory where `mixed.wav` will be written |
 | `on_status` | `callable \| None` | Called with `"Preparing audio..."` before mixing |
 
-**Returns**: `Path` — absolute path to the written `mixed.wav`.  
+**Returns**: `np.ndarray` — normalised `float32` mono array at `SAMPLE_RATE` Hz.  
 **Raises**: `RuntimeError` — if any enabled source has an error or captured no audio. The message lists all failures.  
 **Side effect**: clears `_speaker_chunks` and `_mic_chunks` after mixing to free memory.
 
@@ -531,8 +532,30 @@ Validates captured audio, mixes streams, normalises, and writes a WAV file.
 | DR-074 | If microphone capture was enabled and a device error occurred, that error contributes to a `RuntimeError`. |
 | DR-075 | If microphone capture was enabled, no device error occurred, but no audio was recorded, a "no audio captured" failure contributes to a `RuntimeError`. |
 | DR-076 | If microphone capture was disabled, the microphone validation step is skipped entirely. |
-| DR-077 | If any validation failure was collected, a `RuntimeError` listing all failures is raised and no file is written. |
-| DR-078 | If all validations pass, `on_status` is called if provided, the streams are mixed and normalised, a WAV file is written, and its path is returned. |
+| DR-077 | If any validation failure was collected, a `RuntimeError` listing all failures is raised and the function returns without mixing. |
+| DR-078 | If all validations pass, `on_status` is called if provided, `_mix()` is called to mix and normalise the streams, `_speaker_chunks` and `_mic_chunks` are cleared to free memory, and the resulting `float32` numpy array is returned. |
+
+---
+
+#### `save_wav(output_dir: str | Path, audio: np.ndarray, on_status: Callable | None = None) -> Path`
+
+Writes a pre-mixed audio array to `mixed.wav` in `output_dir`. Called only when WAV saving is enabled (F-40); the audio array must have been obtained from a prior call to `get_mixed_audio()`.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `output_dir` | `str \| Path` | Directory where `mixed.wav` will be written |
+| `audio` | `np.ndarray` | Normalised `float32` mono array (from `get_mixed_audio()`) |
+| `on_status` | `callable \| None` | Called with `"Saving audio..."` before writing |
+
+**Returns**: `Path` — absolute path to the written `mixed.wav`.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-241 | If `on_status` is provided, it is called with `"Saving audio..."` before writing begins; if omitted, no callback is made. |
+| DR-242 | The provided `float32` numpy array is written as a 16-bit PCM WAV file at `output_dir / "mixed.wav"` using `soundfile.write()` with `samplerate=SAMPLE_RATE` and `subtype="PCM_16"`. |
+| DR-243 | The absolute path of the written file is returned. |
 ---
 
 #### `get_levels() -> tuple[int, int]`
@@ -673,13 +696,13 @@ Receives both AI managers by dependency injection. No model loading occurs here.
 
 ---
 
-#### `process(wav: Path, output_dir: Path, language: str | None, enable_diarization: bool, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> Path | None`
+#### `process(audio: np.ndarray | Path, output_dir: Path, language: str | None, enable_diarization: bool, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> Path | None`
 
-Top-level entry point: transcribes the WAV and optionally diarizes.
+Top-level entry point: transcribes the audio and optionally diarizes.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `wav` | `Path` | Path to the WAV file to process |
+| `audio` | `np.ndarray \| Path` | Normalised `float32` numpy array (post-recording path) or path to a WAV file (WAV-file transcription path, F-16) |
 | `output_dir` | `Path` | Directory where transcript files are written |
 | `language` | `str \| None` | Language code or `None` for auto-detect |
 | `enable_diarization` | `bool` | Whether to run speaker identification |
@@ -698,6 +721,7 @@ Top-level entry point: transcribes the WAV and optionally diarizes.
 | DR-100 | If transcription produces segments and diarization is enabled but cancellation is requested before diarization begins, the plain transcript is written and its path is returned without running diarization. |
 | DR-101 | If diarization runs and completes but cancellation is requested before the diarized transcript is written, the plain transcript path is returned. |
 | DR-102 | If diarization runs and completes without cancellation, the diarized transcript is written and its path is returned. |
+| DR-244 | If `audio` is a `numpy.ndarray`, it is forwarded directly to `whisper.transcribe()` and to `_run_diarization()`, which performs the tensor conversion internally (DR-106); if it is a `Path`, both calls receive the file path. |
 ---
 
 #### `_save_transcript(segments: list, output_dir: Path) -> Path` *(private)*
@@ -715,9 +739,9 @@ Writes `transcript.txt` with lines of the form `[HH:MM:SS.mmm] text`.
 | DR-105 | Segments whose text content is non-empty are written as lines; segments with blank text are skipped. |
 ---
 
-#### `_run_diarization(wav: Path, on_status: Callable | None = None) -> Annotation` *(private)*
+#### `_run_diarization(audio: np.ndarray | Path, on_status: Callable | None = None) -> Annotation` *(private)*
 
-Loads the WAV with `soundfile`, converts to a torch tensor, runs the pyannote pipeline, and returns the `exclusive_speaker_diarization` annotation.
+Accepts a normalised `float32` numpy array or a WAV file path, converts to a pyannote-compatible waveform dict, runs the pyannote pipeline, and returns the `exclusive_speaker_diarization` annotation.
 
 **Returns**: `pyannote.core.Annotation`.  
 **Side effect**: logs start and completion (with speaker count) at INFO level; imports `torch` lazily; frees the waveform tensor with `del`.
@@ -726,8 +750,8 @@ Loads the WAV with `soundfile`, converts to a torch tensor, runs the pyannote pi
 
 | ID | Requirement |
 |---|---|
-| DR-106 | If the WAV file is mono, the audio data is correctly shaped for the pipeline. |
-| DR-107 | If the WAV file is multi-channel, it is converted to the expected channel-first layout before being passed to the pipeline. |
+| DR-106 | If `audio` is a `numpy.ndarray` (float32, mono), it is converted to a 2-D `torch.Tensor` of shape `[1, N]` via `torch.from_numpy(audio).unsqueeze(0)` and wrapped in a `{"waveform": tensor, "sample_rate": SAMPLE_RATE}` dict; no file I/O occurs. |
+| DR-107 | If `audio` is a `Path`, it is read with `soundfile.read()`; a mono file is reshaped to `[1, N]`; a multi-channel file is transposed to `[C, N]` channel-first layout; the result is wrapped in a `{"waveform": tensor, "sample_rate": file_sr}` dict. |
 | DR-108 | If `on_status` is provided, it is called before the pipeline runs; if omitted, no callback is made. |
 | DR-109 | If a GPU is available, the audio data is moved to the GPU before the pipeline call; otherwise it remains on CPU. |
 | DR-214 | The blocking pipeline call runs on a daemon thread; the caller polls `cancel_event` every ≤100 ms via `threading.Event.wait(timeout=0.1)` and returns `None` immediately if the event is set, without waiting for the pipeline daemon to finish. |
@@ -993,10 +1017,10 @@ Main loop of the live transcription pipeline. Runs until `_live_pipeline_stop_ev
 | ID | Requirement |
 |---|---|
 | DR-222 | If the amount of new audio since `_live_processed_samples` is less than `PIPELINE_CHUNK_SECONDS × SAMPLE_RATE` samples, the loop sleeps 0.7 s and retries without calling Whisper. |
-| DR-223 | When enough audio is available, it is written to a temporary WAV file (`_live_chunk.wav` in the session folder) and passed to `whisper.transcribe()` with `_live_pipeline_stop_event` as the cancellation event. |
+| DR-223 | When enough audio is available, the numpy float32 audio slice returned by `get_mixed_since(_live_processed_samples)` is passed directly to `whisper.transcribe()` with `_live_pipeline_stop_event` as the cancellation event; no temporary WAV file is created. |
 | DR-224 | For each returned segment with non-empty text, a `(base_seconds, segment)` tuple is appended to `_live_transcribed_segments`, where `base_seconds = _live_processed_samples / SAMPLE_RATE`. The absolute timestamp will be `base_seconds + segment.start` at merge time. |
 | DR-225 | After each successful transcription cycle, `_live_processed_samples` is updated to `total_samples` as returned by `get_mixed_since()`; this ensures the next cycle processes only newly arrived audio. |
-| DR-226 | When the loop exits (stop event set), `_live_chunk.wav` is deleted if it exists. |
+| DR-226 | When the loop exits (stop event set), the thread returns cleanly; no temporary files require deletion. |
 ---
 
 #### `_stop_live_pipeline() -> None`
@@ -1032,40 +1056,42 @@ Creates the output folder, calls `recorder.save_wav`, then `engine.process`. Emi
 
 | ID | Requirement |
 |---|---|
-| DR-153 | If saving the audio to WAV fails, an error signal is emitted and no transcription is attempted. |
-| DR-154 | If `enable_transcription` is `False`, the WAV file path is emitted as the result immediately without calling the transcription engine. |
+| DR-231 | If `_recording_output_dir` is already set (created at recording start), that folder is reused as the output directory; if it is unexpectedly `None`, a new timestamped folder is created as a fallback. In both cases, `_recording_output_dir` is reset to `None` on exit. |
+| DR-153 | `recorder.get_mixed_audio()` is called to mix and normalise captured audio in memory; if it raises `RuntimeError`, an error signal is emitted and no further processing occurs. |
+| DR-245 | After `get_mixed_audio()` returns the audio numpy array, if WAV saving is enabled (F-40), `recorder.save_wav(output_dir, audio)` is called to write `mixed.wav` at `output_dir / "mixed.wav"`; the returned path is stored for use in the completion signal. If WAV saving is disabled, no file is written to disk. |
+| DR-246 | If WAV saving is enabled and `save_wav()` raises any exception, an error signal is emitted and no further processing occurs. |
+| DR-154 | If `enable_transcription` is `False` (WAV saving must be enabled by F-42 in this case), the path of the written `mixed.wav` is emitted via `finished` and the method returns without calling the transcription engine. |
 | DR-155 | If the transcription engine raises an error, an error signal is emitted. |
 | DR-156 | If transcription completes normally without cancellation, the path of the produced transcript is emitted as the result. |
 | DR-157 | If cancellation was requested during processing, a cancellation signal is emitted, carrying the folder path if a partial transcript was saved. |
-| DR-231 | If `_recording_output_dir` is already set (created at recording start), that folder is reused as the output directory; if it is unexpectedly `None`, a new timestamped folder is created as a fallback. In both cases, `_recording_output_dir` is reset to `None` on exit. |
-| DR-232 | If the live pipeline accumulated any segments (`_live_transcribed_segments` is non-empty), `_process_with_live_segments()` is called instead of `engine.process()`; the accumulated segment list is snapshotted and cleared before the call. |
-| DR-233 | If no live segments are available (live pipeline was disabled, or Whisper was not ready at recording start), the normal full-audio `engine.process()` path is used unchanged. |
+| DR-232 | If the live pipeline accumulated any segments (`_live_transcribed_segments` is non-empty), `_process_with_live_segments()` is called with the audio numpy array instead of `engine.process()`; the accumulated segment list is snapshotted and cleared before the call. |
+| DR-233 | If no live segments are available (live pipeline was disabled, or Whisper was not ready at recording start), the full audio numpy array is passed directly to `engine.process()`. |
 ---
 
-#### `_process_with_live_segments(wav, output_dir, language, enable_diarization, live_pairs) -> Path | None` *(background thread)*
+#### `_process_with_live_segments(audio, output_dir, language, enable_diarization, live_pairs) -> Path | None` *(background thread)*
 
 Fast post-processing path used when the live pipeline collected at least one segment.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `wav` | `Path` | Full session WAV saved by `save_wav()` |
+| `audio` | `np.ndarray` | Full session audio array from `get_mixed_audio()` (float32, mono, `SAMPLE_RATE` Hz) |
 | `output_dir` | `Path` | Session output folder |
 | `language` | `str \| None` | Language code or auto-detect |
 | `enable_diarization` | `bool` | Whether to run pyannote after transcription |
 | `live_pairs` | `list` | Snapshot of `_live_transcribed_segments`: `[(base_seconds, Segment), …]` |
 
-**Behaviour**: reads the full WAV once to determine total length, extracts only the tail (samples `_live_processed_samples … end`), transcribes the tail, builds `_OffsetSegment` objects for both live and tail segments, then delegates to `engine._save_transcript()` and optionally `engine._save_diarized_transcript()`.
+**Behaviour**: uses the in-memory audio array to extract only the tail slice not yet covered by the live pipeline, transcribes it as a numpy array, builds `_OffsetSegment` objects for both live and tail segments, then delegates to `engine._save_transcript()` and optionally `engine._save_diarized_transcript()`.
 
 **Detailed requirements**:
 
 | ID | Requirement |
 |---|---|
-| DR-234 | The full WAV is read to determine total sample count; if reading fails, the method falls back to `engine.process()` on the full audio. |
-| DR-235 | If `_live_processed_samples < total_samples` and cancellation has not been requested, the tail slice is written to a temporary `_tail.wav`, transcribed, and the file is deleted afterwards. |
+| DR-234 | Total sample count is derived from `audio.shape[0]`; no file I/O is performed to determine this value. |
+| DR-235 | If `_live_processed_samples < total_samples` and cancellation has not been requested, the tail audio slice `audio[_live_processed_samples:]` is passed directly to `whisper.transcribe()` as a numpy array; no temporary WAV file is created. |
 | DR-236 | Pre-transcribed segments and tail segments are each wrapped in `_OffsetSegment` with the appropriate `base_seconds` offset before being merged. |
 | DR-237 | If the combined segment list is empty (no speech detected anywhere), `None` is returned. |
 | DR-238 | If diarization is disabled or cancelled, only `transcript.txt` is produced. |
-| DR-239 | If diarization is enabled and not cancelled, `engine._run_diarization()` is called on the full WAV and `engine._save_diarized_transcript()` is called with the merged `_OffsetSegment` list. |
+| DR-239 | If diarization is enabled and not cancelled, `engine._run_diarization()` is called with the full audio numpy array and `engine._save_diarized_transcript()` is called with the merged `_OffsetSegment` list. |
 ---
 
 #### `_transcribe_wav_file(wav_path, language, enable_diarization) -> None` *(background thread)*
@@ -1098,6 +1124,7 @@ Enables/disables all controls based on current state flags.
 | DR-165 | The "Install Pyannote" button is visible whenever Whisper is ready and pyannote is not ready. It is enabled only when the app is idle (not recording, not processing) and no pyannote loading/installation is in progress. |
 | DR-166 | The "Transcribe WAV" button is enabled only when Whisper is ready, no recording is active, and no processing is running. |
 | DR-167 | Source checkboxes and device selectors are locked while recording or processing is active. |
+| DR-247 | The WAV saving checkbox is enabled (toggleable) in the Idle state; it is locked (visible but not toggleable) in all other states (ModelLoading, Installing, Recording, Processing, Cancelling). |
 ---
 
 #### `_on_source_toggled() -> None`
@@ -1108,7 +1135,7 @@ Updates Start button and combo enabled states when a source checkbox changes.
 
 | ID | Requirement |
 |---|---|
-| DR-168 | If at least one source checkbox is checked and the app is idle, the Start button is enabled; otherwise it is disabled. |
+| DR-168 | If at least one source checkbox is checked, `_outputs_enabled()` returns `True`, and the app is idle, the Start button is enabled; otherwise it is disabled. |
 | DR-169 | The microphone device selector is enabled only when the microphone checkbox is checked and the app is idle. |
 | DR-170 | The speaker device selector is enabled only when the speaker checkbox is checked and the app is idle. |
 ---
@@ -1123,6 +1150,19 @@ Returns `True` if at least one source checkbox is checked.
 |---|---|
 | DR-171 | If at least one of the microphone or speaker checkboxes is checked, returns `True`. |
 | DR-172 | If both are unchecked, returns `False`. |
+
+---
+
+#### `_outputs_enabled() -> bool`
+
+Returns `True` if at least one output is enabled — that is, if the transcription checkbox or the WAV saving checkbox (or both) are checked. Used by `_update_controls()` and `_on_source_toggled()` to evaluate the Start button guard (F-42).
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-248 | If at least one of the transcription checkbox or the WAV saving checkbox is checked, returns `True`. |
+| DR-249 | If both the transcription checkbox and the WAV saving checkbox are unchecked, returns `False`. |
 ---
 
 #### `_update_duration() -> None`
@@ -1181,6 +1221,7 @@ Called every 80 ms; reads `recorder.get_levels()` and updates progress bars.
 | DR-181 | If Whisper is not ready, the transcription checkbox is left as disabled. |
 | DR-182 | If both Whisper and pyannote are ready, the diarization checkbox is restored to its saved value. |
 | DR-183 | If either model is not ready, the diarization checkbox is left as disabled. |
+| DR-251 | `_update_controls()` is called as the **last** step of `_on_initial_load_complete()`, after all checkbox states have been restored from `_pending_settings`; this guarantees that the Start button is evaluated against the fully restored output state (transcription and/or WAV saving) and is enabled if at least one source and one output are active. |
 ---
 
 #### `_on_whisper_setup_requested() -> None`
@@ -1275,6 +1316,18 @@ Called every 80 ms; reads `recorder.get_levels()` and updates progress bars.
 
 ---
 
+#### `_on_wav_save_toggled(checked: bool) -> None`
+
+Connected to the WAV saving checkbox. Re-evaluates the Start button state and WAV saving controls whenever the WAV saving option changes (F-40, F-42).
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-250 | single path — control states are updated regardless of whether the WAV saving checkbox is checked or unchecked, ensuring the Start button correctly reflects the combined source and output state (`_sources_enabled()` ∧ `_outputs_enabled()`). |
+
+---
+
 #### `_on_install_whisper_clicked() -> None`
 
 **Detailed requirements**:
@@ -1338,7 +1391,7 @@ Applies a settings dict to all relevant widgets using `_combo_set_data` for comb
 
 | ID | Requirement |
 |---|---|
-| DR-209 | single path — each widget is set from the supplied dict. If a stored device or language value is no longer available in its combo box, that item is left at its current selection. |
+| DR-209 | single path — each widget is set from the supplied dict, including the WAV saving checkbox (key `"save_wav"`, default `False` per `_SETTINGS_DEFAULTS`). If a stored device or language value is no longer available in its combo box, that item is left at its current selection. |
 
 ---
 
@@ -1416,7 +1469,8 @@ This section provides full, function-level traceability from every element of `A
 | Mixed-stream static helper | `_mix_streams()` §5.2 |
 | Thread-safe incremental audio snapshot | `get_mixed_since()` §5.2 |
 | Peak normalisation | `_mix()`, `_mix_streams()` §5.2 |
-| WAV file export | `save_wav()` §5.2 |
+| In-memory audio mix, normalise, and return (no file I/O) | `get_mixed_audio()` §5.2 |
+| WAV file export (F-40 only) | `save_wav()` §5.2 |
 | Device error notification via callback | `_record_speaker()`, `_record_microphone()` §5.2 |
 
 #### `TranscriptionEngine` (§6)
@@ -1458,6 +1512,8 @@ This section provides full, function-level traceability from every element of `A
 | Manual pyannote re-installation (§4.6, F-31) | `_on_install_pyannote_clicked()`, `_run_pyannote_install()` §8.7 |
 | Control state enforcement (§4.6) | `_update_controls()` §8.6 |
 | Source toggle handling (§4.6) | `_on_source_toggled()` §8.6 |
+| Output enabled check (F-42, §4.6) | `_outputs_enabled()` §8.6 |
+| WAV saving toggle handling (F-40, §4.6) | `_on_wav_save_toggled()` §8.7 |
 | Level meter update 80 ms (§3.2, NF-02) | `_update_levels()` §8.6 |
 | Duration timer update 1 s (§3.2) | `_update_duration()` §8.6 |
 | UI preferences save (§4.4) | `_save_settings()` §8.8 |
@@ -1555,12 +1611,13 @@ This section provides full, function-level traceability from every element of `A
 | Sequence step | Implementing Method |
 |---|---|
 | Create timestamped output folder | `MainWindow._process_recording()` §8.5 (DR-231 — reuses folder from `_recording_output_dir`) |
-| `save_wav()` — mix, normalise, write | `AudioRecorder.save_wav()` §5.2 |
+| `get_mixed_audio()` — mix and normalise in memory | `AudioRecorder.get_mixed_audio()` §5.2 |
 | Internal audio mixing | `AudioRecorder._mix()` §5.2 |
-| `process(wav, language, diarization, cancel_event)` | `TranscriptionEngine.process()` §6.2 |
-| `transcribe(wav, language)` | `WhisperManager.transcribe()` §3.2 |
+| `save_wav(output_dir, audio)` — write `mixed.wav` (if F-40 enabled) | `AudioRecorder.save_wav()` §5.2 |
+| `process(audio, language, diarization, cancel_event)` | `TranscriptionEngine.process()` §6.2 |
+| `transcribe(audio)` — numpy array passed directly | `WhisperManager.transcribe()` §3.2 |
 | `cancel_event` checked per segment | `WhisperManager.transcribe()` §3.2 |
-| `get_pipeline()(waveform)` | `PyannoteManager.get_pipeline()` §4.2 |
+| Build `{waveform: tensor, sample_rate}` dict; `get_pipeline()(waveform_dict)` | `TranscriptionEngine._run_diarization()` §6.2; `PyannoteManager.get_pipeline()` §4.2 |
 | Assign speakers to words | `TranscriptionEngine._assign_speakers_to_words()` §6.2 |
 | Best-speaker selection per word | `TranscriptionEngine._find_best_speaker()` §6.2 |
 | Write `transcript.txt` | `TranscriptionEngine._save_transcript()` §6.2 |
@@ -1608,18 +1665,17 @@ This section provides full, function-level traceability from every element of `A
 | Create output folder at recording start | `MainWindow._start_recording()` §8.5 |
 | Start live pipeline thread | `MainWindow._start_live_pipeline()` §8.5 |
 | `get_mixed_since(_live_processed_samples)` | `AudioRecorder.get_mixed_since()` §5.2 |
-| Write temp chunk WAV | `sf.write()` inside `_run_live_pipeline()` §8.5 |
-| `transcribe(_live_chunk.wav)` — live | `WhisperManager.transcribe()` §3.2 (acquires `_transcribe_lock`) |
+| `transcribe(audio_slice)` — numpy array, no temp file | `WhisperManager.transcribe()` §3.2 (acquires `_transcribe_lock`) |
 | Accumulate `(base_seconds, seg)` in `_live_transcribed_segments` | `MainWindow._run_live_pipeline()` §8.5 |
 | Update `_live_processed_samples` | `MainWindow._run_live_pipeline()` §8.5 |
 | Set stop event, join thread | `MainWindow._stop_live_pipeline()` §8.5 |
-| Delete `_live_chunk.wav` | `MainWindow._run_live_pipeline()` §8.5 (finally block) |
-| Snapshot `_live_transcribed_segments`, select fast/normal path | `MainWindow._process_recording()` §8.5 |
-| Read full WAV, extract tail audio | `MainWindow._process_with_live_segments()` §8.5 |
-| Transcribe tail only | `WhisperManager.transcribe()` §3.2 |
+| Thread exits cleanly; no temp files to remove | `MainWindow._run_live_pipeline()` §8.5 |
+| Snapshot `_live_transcribed_segments`; pass audio array to fast or normal path | `MainWindow._process_recording()` §8.5 |
+| Derive total sample count from `audio.shape[0]`; extract tail slice `audio[_live_processed_samples:]` | `MainWindow._process_with_live_segments()` §8.5 |
+| Transcribe tail numpy slice | `WhisperManager.transcribe()` §3.2 |
 | Wrap segments in `_OffsetSegment` and merge | `MainWindow._process_with_live_segments()` §8.5 |
 | Write `transcript.txt` from merged list | `TranscriptionEngine._save_transcript()` §6.2 |
-| Optionally diarize full WAV and write `transcript_diarized.txt` | `TranscriptionEngine._run_diarization()`, `_save_diarized_transcript()` §6.2 |
+| Optionally diarize full audio array and write `transcript_diarized.txt` | `TranscriptionEngine._run_diarization()`, `_save_diarized_transcript()` §6.2 |
 
 #### ARCH §3.7 — Settings & Preferences Lifecycle
 
@@ -1671,7 +1727,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 |---|---|---|---|
 | DR-017–DR-018 | is_installed() | F-26 | §3.1 |
 | DR-019–DR-023 | load() | F-26, NF-03, NF-04, NF-05 | §3.1, §4.5 |
-| DR-024–DR-028 | 	ranscribe() | F-10, F-12, F-14, F-15 | §3.3, §3.5 |
+| DR-024–DR-028, DR-240 | transcribe() | F-10, F-12, F-14, F-15 | §3.3, §3.5, §4.8 |
 | DR-213 | transcribe() — lock serialisation | F-36, F-38 | §3.6, §4.1 |
 
 ---
@@ -1699,7 +1755,8 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-061–DR-064 | start() | F-01, F-02, F-03 | §3.2 |
 | DR-065–DR-068 | stop() | F-01, F-02 | §3.2 |
 | DR-069–DR-070 | mute_mic() | F-06 | §3.2 |
-| DR-071–DR-078 | save_wav() | F-03, F-24, NF-07, NF-08 | §3.3 |
+| DR-071–DR-078 | get_mixed_audio() | F-03, NF-07, NF-08 | §3.3, §4.8 |
+| DR-241–DR-243 | save_wav() | F-24, F-40 | §3.3, §4.8 |
 | DR-079–DR-083 | get_levels() | F-07, NF-02 | §3.2 |
 | DR-084–DR-087 | _record_speaker() | F-02, F-05, C-01, NF-07, NF-08 | §3.2 |
 | DR-088–DR-092 | _record_microphone() | F-01, F-04, F-06, NF-07, NF-08 | §3.2 |
@@ -1721,9 +1778,9 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 
 | DR range | Implementing Method | SRS IDs | Architecture Ref |
 |---|---|---|---|
-| DR-098–DR-102 | process() | F-10, F-14, F-15, F-17, F-22, F-23 | §3.3, §3.5 |
+| DR-098–DR-102, DR-244 | process() | F-10, F-14, F-15, F-17, F-22, F-23 | §3.3, §3.5, §4.8 |
 | DR-103–DR-105 | _save_transcript() | F-22, F-25 | §3.3 |
-| DR-106–DR-109 | _run_diarization() | F-17, NF-03 | §3.3 |
+| DR-106–DR-109 | _run_diarization() | F-17, NF-03 | §3.3, §4.8 |
 | DR-214 | _run_diarization() — daemon thread polling | F-14, F-15 | §3.3, §4.1 |
 | DR-110–DR-112 | _save_diarized_transcript() | F-23, F-25 | §3.3 |
 | DR-113–DR-114 | _unique_path() | F-25 | §3.3 |
@@ -1757,11 +1814,11 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-148–DR-151 | _start_recording() | F-01, F-02, F-03, F-07 | §3.2 |
 | DR-229 | _start_recording() — folder at start | F-39 | §3.6 |
 | DR-220–DR-221 | _start_live_pipeline() | F-36, F-37 | §3.6 |
-| DR-222–DR-226 | _run_live_pipeline() | F-36, F-37 | §3.6 |
+| DR-222–DR-226 | _run_live_pipeline() | F-36, F-37 | §3.6, §4.8 |
 | DR-227–DR-228 | _stop_live_pipeline() | F-38 | §3.6 |
 | DR-152, DR-230 | _stop_recording() | F-10, F-21, F-38 | §3.2, §3.3, §3.6 |
-| DR-153–DR-157, DR-231–DR-233 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, F-37, NF-07, NF-08 | §3.3, §3.6 |
-| DR-234–DR-239 | _process_with_live_segments() | F-37 | §3.6 |
+| DR-153–DR-157, DR-231–DR-233, DR-245–DR-246 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, F-37, F-40, F-42, NF-07, NF-08 | §3.3, §3.6, §4.8 |
+| DR-234–DR-239 | _process_with_live_segments() | F-37 | §3.6, §4.8 |
 | DR-158–DR-160 | _transcribe_wav_file() | F-14, F-15, F-16, NF-05, NF-08 | §3.5 |
 
 ---
@@ -1770,9 +1827,10 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 
 | DR range | Implementing Method | SRS IDs | Architecture Ref |
 |---|---|---|---|
-| DR-161–DR-167 | _update_controls() | F-11, F-16, F-18, F-19, F-31, NF-12 | §4.6 |
-| DR-168–DR-170 | _on_source_toggled() | F-04, F-05, F-09, NF-12 | §4.6 |
+| DR-161–DR-167, DR-247 | _update_controls() | F-11, F-16, F-18, F-19, F-31, F-40, F-41, NF-12 | §4.6 |
+| DR-168–DR-170 | _on_source_toggled() | F-04, F-05, F-09, F-42, NF-12 | §4.6 |
 | DR-171–DR-172 | _sources_enabled() | F-09 | §4.6 |
+| DR-248–DR-249 | _outputs_enabled() | F-42 | §4.6 |
 | DR-173–DR-174 | _update_duration() | F-08 | §3.2 |
 | DR-175 | _update_levels() | F-07, NF-02 | §3.2 |
 
@@ -1784,7 +1842,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 |---|---|---|---|
 | DR-176–DR-177 | _on_whisper_ready() | F-26, NF-12 | §3.1 |
 | DR-178–DR-179 | _on_pyannote_ready() | F-17, NF-12 | §3.1 |
-| DR-180–DR-183 | _on_initial_load_complete() | F-11, F-18, F-32, NF-12 | §3.1, §3.6, §4.4, §4.6 |
+| DR-180–DR-183, DR-251 | _on_initial_load_complete() | F-11, F-18, F-32, F-42, NF-12 | §3.1, §3.6, §4.4, §4.6 |
 | DR-184–DR-185 | _on_whisper_setup_requested() | F-26 | §3.1 |
 | DR-186–DR-188 | _on_pyannote_setup_requested() | F-28, NF-05 | §3.1, §3.4 |
 | DR-189–DR-191 | _on_messagebox_requested() | NF-08 | §4.1 |
@@ -1794,6 +1852,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-197 | _on_transcription_error() | NF-05, NF-08 | §3.3 |
 | DR-198–DR-199 | _on_mute_mic_clicked() | F-06 | §3.2 |
 | DR-200 | _on_transcribe_toggled() | F-11, NF-12 | §4.6 |
+| DR-250 | _on_wav_save_toggled() | F-40, F-42, NF-12 | §4.6 |
 | DR-201 | _on_install_whisper_clicked() | F-31, NF-12 | §3.1, §3.7, §4.6 |
 | DR-202–DR-204 | _run_whisper_install() | F-26, F-31, NF-05 | §3.1, §3.7 |
 | DR-205 | _on_install_pyannote_clicked() | F-31, NF-12 | §3.1, §3.7, §4.6 |

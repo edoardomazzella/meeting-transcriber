@@ -42,13 +42,14 @@ classDiagram
         +stop()
         +mute_mic(bool)
         +get_levels()
-        +save_wav()
+        +get_mixed_audio()
+        +save_wav() [F-40 only]
     }
 
     class ASREngine {
         <<AI Layer>>
         +load(on_status)
-        +transcribe(wav, language)
+        +transcribe(audio, language)
         +is_installed()
     }
 
@@ -62,7 +63,7 @@ classDiagram
 
     class TranscriptionEngine {
         <<Orchestration Layer>>
-        +process(wav, options)
+        +process(audio, options)
     }
 
     class PyannoteSetupDialog {
@@ -89,10 +90,10 @@ The **Component Design §** column references the corresponding section in `DETA
 |---|---|---|---|
 | **MainWindow** | UI | User interaction, control state, background thread orchestration, live pipeline lifecycle, settings I/O | CD §8 |
 | **Signals** | Signal Bus | Typed Qt signals for safe cross-thread UI updates; decouples background threads from UI widgets | CD §2 |
-| **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing, normalisation, WAV export; thread-safe incremental audio snapshot (`get_mixed_since`) | CD §5 |
+| **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing and normalisation; `get_mixed_audio()` returns a normalised numpy float32 array for direct in-memory AI inference; `save_wav()` writes to disk only when WAV saving is enabled (F-40); thread-safe incremental audio snapshot (`get_mixed_since`) | CD §5 |
 | **ASREngine** | AI | Whisper model lifecycle (download, load, transcribe); GPU→CPU fallback | CD §3 (`WhisperManager`) |
 | **DiarizationEngine** | AI | pyannote pipeline lifecycle; HuggingFace token management; speaker segmentation | CD §4 (`PyannoteManager`) |
-| **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; speaker-to-word assignment; transcript file generation | CD §6 |
+| **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; accepts a numpy float32 audio array (post-recording path) or a file path (WAV-file transcription path, F-16); passes audio directly to ASR with no intermediate disk write; builds a pyannote-compatible `{"waveform": tensor, "sample_rate": int}` dict from the in-memory array for diarization; speaker-to-word assignment; transcript file generation | CD §6 |
 | **PyannoteSetupDialog** | UI | One-shot dialog for HuggingFace token entry and model download | CD §7 |
 
 > **Note on naming**: `ASREngine` and `DiarizationEngine` are the logical names used at architecture level. Their concrete implementations are `WhisperManager` and `PyannoteManager` respectively.
@@ -202,16 +203,21 @@ sequenceDiagram
 
     Note over GUI,BG: Thread spawned by _stop_recording() — see §3.2
     BG->>BG: Create timestamped output folder (recordings/YYYYMMDD_HHMMSS/)
-    BG->>Rec: save_wav(output_dir) — mix, normalise, write mixed.wav
-    Rec-->>BG: mixed.wav path
+    BG->>Rec: get_mixed_audio() — mix and normalise in memory
+    Rec-->>BG: audio (numpy float32, 16 kHz mono)
+
+    opt WAV saving enabled (F-40)
+        BG->>Rec: save_wav(output_dir) — write mixed.wav to disk
+    end
 
     alt Transcription enabled
-        BG->>TE: process(wav, language, diarization, cancel_event)
-        TE->>ASR: transcribe(wav, language)
+        BG->>TE: process(audio, language, diarization, cancel_event)
+        TE->>ASR: transcribe(audio) — numpy array, no intermediate disk I/O
         ASR-->>TE: segments[] (may be partial if cancelled)
 
         alt Diarization enabled and not cancelled
-            TE->>Dia: get_pipeline()(waveform) — runs in daemon thread
+            TE->>TE: build waveform dict {waveform: tensor, sample_rate}
+            TE->>Dia: get_pipeline()(waveform_dict) — no disk I/O, runs in daemon thread
             Note right of Dia: cancel_event polled every ≤100 ms
             Dia-->>TE: speaker_segments
             TE->>TE: assign_speakers_to_words(segments, speaker_segments)
@@ -223,8 +229,8 @@ sequenceDiagram
         BG-->>GUI: finished(folder, transcript_path) signal
         GUI->>GUI: _update_controls() — restore Start, hide Cancel
         GUI->>User: "Completed" dialog with folder path
-    else Transcription disabled
-        BG-->>GUI: finished(folder, mixed.wav path) signal
+    else Transcription disabled (WAV saving enabled, F-40/F-42)
+        BG-->>GUI: finished(folder, wav_path) signal
         GUI->>User: "Completed" dialog (audio only)
     end
 
@@ -293,12 +299,12 @@ sequenceDiagram
     GUI->>User: Open-file dialog
     User->>GUI: Select .wav file
     GUI->>BG: Start _transcribe_wav_file thread
-    BG->>TE: process(wav, language, diarization)
-    TE->>ASR: transcribe(wav, language)
+    BG->>TE: process(wav_path, language, diarization)
+    TE->>ASR: transcribe(wav_path) — file path accepted by faster-whisper
     ASR-->>TE: segments[]
 
     alt Diarization enabled
-        TE->>Dia: get_pipeline()(waveform)
+        TE->>Dia: get_pipeline()(wav_path) — file path accepted by pyannote
         Dia-->>TE: speaker_segments
         TE-->>BG: transcript_diarized.txt
     else Diarization disabled
@@ -311,7 +317,7 @@ sequenceDiagram
 
 ### 3.6 Live Pipeline Transcription
 
-When `pipeline_transcription` is enabled in `config.json` and Whisper is ready, a live pipeline thread starts at the same time as `AudioRecorder.start()`. It polls the accumulating audio buffer every `PIPELINE_CHUNK_SECONDS` seconds, runs Whisper on each new slice, and **stores the returned segments in memory** alongside their base-time offset. No additional output file is written during recording. When the user clicks Stop, the live thread is joined and post-processing begins using the accumulated segments plus a tail transcription of any remaining audio, producing the standard `transcript.txt` (and optionally `transcript_diarized.txt`) with reduced wait time.
+When `pipeline_transcription` is enabled in `config.json` and Whisper is ready, a live pipeline thread starts at the same time as `AudioRecorder.start()`. It polls the accumulating audio buffer every `PIPELINE_CHUNK_SECONDS` seconds, runs Whisper on each in-memory audio slice (numpy float32 array — no temporary WAV file), and **stores the returned segments in memory** alongside their base-time offset. No output file is written during recording. When the user clicks Stop, the live thread is joined and post-processing begins using the accumulated segments plus a tail transcription of any remaining audio (passed as a numpy array), producing the standard `transcript.txt` (and optionally `transcript_diarized.txt`) with reduced wait time.
 
 ```mermaid
 sequenceDiagram
@@ -333,8 +339,7 @@ sequenceDiagram
         alt len(audio_slice) < chunk_samples
             LP->>LP: sleep 0.7 s, retry
         else enough audio available
-            LP->>LP: sf.write(_live_chunk.wav)
-            LP->>ASR: transcribe(_live_chunk.wav) — acquires _transcribe_lock
+            LP->>ASR: transcribe(audio_slice) — numpy array, acquires _transcribe_lock
             ASR-->>LP: segments[]
             LP->>MEM: append (base_seconds, seg) for each non-empty segment
             LP-->>GUI: status_changed "Recording... (N s pre-transcribed)"
@@ -345,12 +350,12 @@ sequenceDiagram
     User->>GUI: Click "Stop Recording"
     GUI->>LP: Set _live_pipeline_stop_event
     GUI->>LP: join(timeout=10 s)
-    LP->>LP: Delete _live_chunk.wav
     LP-->>GUI: thread exits
 
     Note over GUI: Post-processing fast path
     GUI->>GUI: _process_with_live_segments()
-    GUI->>ASR: transcribe(tail_only.wav) — only audio after _live_processed_samples
+    GUI->>Rec: get_mixed_audio(from=_live_processed_samples) — tail slice only
+    GUI->>ASR: transcribe(tail_audio) — numpy array, only audio after _live_processed_samples
     GUI->>GUI: Merge live_segments + tail_segments → _OffsetSegment list
     GUI->>GUI: engine._save_transcript() — writes transcript.txt as normal
 ```
@@ -433,7 +438,7 @@ All background threads communicate with the UI exclusively via Qt signals. No ba
 
 **Live pipeline thread safety** (see CD §3.2 DR-213 and CD §5.2 DR-219):
 - *Transcription lock*: `WhisperManager._transcribe_lock` (`threading.Lock`) serialises all `transcribe()` calls. The live pipeline thread and the post-processing thread share the same `WhisperModel` instance; the lock guarantees they never call it concurrently.
-- *Chunk buffer lock*: `AudioRecorder._chunks_lock` (`threading.Lock`) protects `_speaker_chunks` and `_mic_chunks` against concurrent writes (capture threads) and reads (`get_mixed_since`, `_mix`, `save_wav`).
+- *Chunk buffer lock*: `AudioRecorder._chunks_lock` (`threading.Lock`) protects `_speaker_chunks` and `_mic_chunks` against concurrent writes (capture threads) and reads (`get_mixed_since`, `get_mixed_audio`, `_mix`, `save_wav`).
 
 ### 4.2 Logging
 All components write to a shared daily log file via the standard Python `logging` module. A global `sys.excepthook` ensures unhandled exceptions are logged before the process exits (NF-05, NF-06). Sensitive values (tokens, credentials) are never passed to log calls — they are referenced only inside `DiarizationEngine.save_token` / `load_token` which write nothing to the log (NF-10).
@@ -469,7 +474,7 @@ stateDiagram-v2
     ModelLoading --> Idle       : initial_load_complete signal
     ModelLoading --> Installing : Install button clicked during loading
 
-    Idle --> Recording  : Start Recording (≥1 source, models ready)
+    Idle --> Recording  : Start Recording (≥1 source, ≥1 output, models ready)
     Idle --> Processing : Transcribe WAV file…
     Idle --> Installing : Install Whisper / Install Pyannote clicked
 
@@ -498,12 +503,13 @@ stateDiagram-v2
 | Language selector | off | off | ✓ if Whisper ready | locked | locked | locked |
 | Transcription checkbox | off | off | ✓ if Whisper ready | locked | locked | locked |
 | Diarization checkbox | off | off | ✓ if both models ready + transcription on | locked | locked | locked |
+| WAV saving checkbox | off | off | ✓ | locked | locked | locked |
 
 **SRS requirements enforced by this mechanism:**
 
 | Rule | SRS requirement |
 |---|---|
-| Start requires ≥ 1 source and models ready | F-09 |
+| Start requires ≥1 source, models ready, and ≥1 output enabled (transcription or WAV saving) | F-09, F-42 |
 | Language selector enabled only when Whisper is loaded | F-12, F-13 |
 | Transcription checkbox enabled only when Whisper is loaded | F-11 |
 | Diarization requires both models and transcription active | F-18, F-19 |
@@ -511,11 +517,37 @@ stateDiagram-v2
 | Mute Mic only during active recording with mic source | F-06 |
 | All controls locked during recording / processing | NF-12 |
 | Install buttons re-enabled when respective model is missing or failed | F-31 |
+| WAV saving checkbox available and unlocked in Idle; locked during recording / processing | F-40 |
+| WAV saving checkbox defaults to off (disabled) on first run | F-41 |
 
 This ensures controls that are inapplicable in the current state are always visually disabled (NF-12).
 
 ### 4.7 Application Icon
 A multi-resolution icon (16 × 16, 32 × 32, 48 × 48, 64 × 64 px) is generated at application startup by `_make_app_icon()` using `QPainter`. No external image files are bundled. The icon is applied to both the `QApplication` instance and `MainWindow`, so it appears in the taskbar, title bar, and Alt+Tab switcher (NF-13).
+
+### 4.8 In-Memory Audio Pipeline
+
+To eliminate unnecessary disk I/O and make WAV saving fully optional (F-40/F-41), audio data flows between components as in-memory numpy float32 arrays at the native capture sample rate (16 kHz mono). The filesystem is only written when the user has explicitly enabled WAV saving.
+
+**Native in-memory inputs accepted by each AI engine:**
+
+| Engine | Accepted in-memory type | Notes |
+|---|---|---|
+| `faster_whisper.WhisperModel.transcribe()` | `numpy.ndarray` (float32, mono) | Accepted directly; no WAV round-trip needed |
+| `pyannote.audio.Pipeline.__call__()` | `{"waveform": torch.Tensor (1×N, float32), "sample_rate": int}` | Built from the numpy array with a single `torch.from_numpy().unsqueeze(0)` call |
+
+**Audio data path per execution path:**
+
+| Execution path | Mixed audio source | To Whisper | To pyannote |
+|---|---|---|---|
+| Post-recording (§3.3) | `AudioRecorder.get_mixed_audio()` → numpy array | numpy array directly | `{"waveform": tensor, "sample_rate"}` built in `TranscriptionEngine` |
+| Live pipeline chunks (§3.6) | `AudioRecorder.get_mixed_since()` → numpy slice | numpy slice directly | — (pyannote runs only in post-processing) |
+| WAV-file transcription (§3.5, F-16) | User-selected file on disk | file path | file path |
+
+**WAV file lifecycle:**
+- `AudioRecorder.get_mixed_audio()` performs the mix + normalise step in memory and returns the result.
+- `AudioRecorder.save_wav()` is called as a separate, optional step only when the WAV saving checkbox is enabled (F-40). It reuses the same normalised data and writes it to `mixed.wav` in the session folder.
+- No temporary WAV files are created at any stage of the live pipeline or post-recording pipeline.
 
 ---
 
@@ -556,7 +588,7 @@ The **Architecture Ref** column contains section numbers within *this document*:
 | F-37 | Pre-transcribed segments reused; only tail re-transcribed | MainWindow | §3.6 | DR-221, DR-232, DR-233, DR-234–DR-239 |
 | F-38 | Live transcription stops before post-processing | MainWindow | §3.6 | DR-227, DR-230 |
 | F-39 | Output folder created at recording start | MainWindow | §3.6 | DR-229 |
-| F-24 | Audio saved alongside transcripts | AudioRecorder, MainWindow | §3.3 | DR-078, DR-154 |
+| F-24 | Audio saved alongside transcripts when WAV saving enabled | AudioRecorder, MainWindow | §3.3, §4.6, §4.8 | DR-078, DR-154 |
 | F-25 | Existing output files never overwritten | TranscriptionEngine | §3.3 | DR-103, DR-104, DR-110, DR-111, DR-113, DR-114 |
 | F-35 | Open output folder from completion dialog | MainWindow | §3.3 | DR-192, DR-193 |
 | F-26 | Prompt to download Whisper on first run | MainWindow, Signals | §3.1 | DR-017, DR-018, DR-131–DR-133, DR-135, DR-176, DR-177, DR-184, DR-185 |
@@ -565,9 +597,12 @@ The **Architecture Ref** column contains section numbers within *this document*:
 | F-29 | Validate token before model download | DiarizationEngine | §3.4 | DR-036, DR-052, DR-054, DR-128 |
 | F-30 | Discard invalid/revoked token | DiarizationEngine | §3.4 | DR-047, DR-049, DR-054, DR-129, DR-140 |
 | F-31 | Manual model re-installation | MainWindow | §3.1, §3.7, §4.6 | DR-164, DR-165, DR-201–DR-206 |
-| F-32 | Restore UI preferences at startup | MainWindow | §3.6, §4.4 | DR-004–DR-008, DR-180, DR-182, DR-207–DR-209 |
+| F-32 | Restore UI preferences at startup (incl. WAV saving state, F-40) | MainWindow | §3.7, §4.4 | DR-004–DR-008, DR-180, DR-182, DR-207–DR-209 |
 | F-33 | Configurable parameters via plain-text file | MainWindow (startup) | §3.6, §4.4 | DR-001–DR-003 |
 | F-34 | Secure token storage in OS credential store | DiarizationEngine | §3.4 | DR-029–DR-050 |
+| F-40 | Enable/disable WAV saving to disk via UI checkbox | AudioRecorder, MainWindow | §3.3, §4.6, §4.8 | — |
+| F-41 | WAV saving defaults to disabled on first run | MainWindow | §3.7, §4.4 | — |
+| F-42 | Start Recording requires ≥1 source and ≥1 output enabled (transcription or WAV saving) | MainWindow | §4.6 | — |
 
 ### 5.2 Non-Functional Requirements
 

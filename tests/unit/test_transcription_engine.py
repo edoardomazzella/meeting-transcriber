@@ -304,31 +304,28 @@ def test_DR_105_save_transcript_skips_blank_segments(engine, tmp_path):
 # ============================================================================
 
 @pytest.mark.filesystem
-def test_DR_106_run_diarization_shapes_mono_correctly(engine, tmp_path, monkeypatch):
-    """DR-106: If the WAV file is mono, the waveform is correctly shaped (1, N)
-    before being passed to the pipeline."""
-    mono = np.ones(4096, dtype=np.float32)  # 1-D
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
-
+def test_DR_106_run_diarization_numpy_array_is_unsqueezed(engine, monkeypatch):
+    """DR-106: If audio is a numpy.ndarray (float32, mono), it is converted to
+    torch.Tensor shape [1, N] via torch.from_numpy(audio).unsqueeze(0); no
+    file I/O occurs."""
+    mono = np.ones(4096, dtype=np.float32)  # 1-D array
     mock_torch = _make_torch_mock(monkeypatch, cuda_available=False)
     mock_result = MagicMock()
     mock_result.exclusive_speaker_diarization = _make_annotation([])
     engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
 
-    wav = tmp_path / "audio.wav"
-    wav.touch()
-    engine._run_diarization(wav)
+    engine._run_diarization(mono)
 
-    # torch.from_numpy must have been called with a 2-D (1, N) array
-    called_array = mock_torch.from_numpy.call_args[0][0]
-    assert called_array.ndim == 2
-    assert called_array.shape[0] == 1
+    # from_numpy must have been called with the array directly
+    mock_torch.from_numpy.assert_called_once_with(mono)
+    # unsqueeze(0) applied to produce [1, N]
+    mock_torch.from_numpy.return_value.unsqueeze.assert_called_once_with(0)
 
 
 @pytest.mark.filesystem
-def test_DR_107_run_diarization_transposes_multichannel(engine, tmp_path, monkeypatch):
-    """DR-107: If the WAV file is multi-channel, it is transposed to (C, N)
-    channel-first layout before being passed to the pipeline."""
+def test_DR_107_run_diarization_path_transposes_multichannel(engine, tmp_path, monkeypatch):
+    """DR-107 (Path, multi-channel): If audio is a Path and the WAV is stereo,
+    it is transposed to [C, N] channel-first layout via .T."""
     stereo = np.ones((4096, 2), dtype=np.float32)  # (N, C) from soundfile
     monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(stereo, 16000)))
 
@@ -346,6 +343,27 @@ def test_DR_107_run_diarization_transposes_multichannel(engine, tmp_path, monkey
     # transposed: first dim is channels (2), second is samples (4096)
     assert called_array.shape[0] == 2
     assert called_array.shape[1] == 4096
+
+
+@pytest.mark.filesystem
+def test_DR_107b_run_diarization_path_reshapes_mono(engine, tmp_path, monkeypatch):
+    """DR-107 (Path, mono): If audio is a Path and the WAV is mono, it is
+    reshaped to [1, N] layout before being passed to pyannote."""
+    mono = np.ones(4096, dtype=np.float32)  # 1-D
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
+
+    mock_torch = _make_torch_mock(monkeypatch, cuda_available=False)
+    mock_result = MagicMock()
+    mock_result.exclusive_speaker_diarization = _make_annotation([])
+    engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
+
+    wav = tmp_path / "audio.wav"
+    wav.touch()
+    engine._run_diarization(wav)
+
+    called_array = mock_torch.from_numpy.call_args[0][0]
+    assert called_array.ndim == 2
+    assert called_array.shape[0] == 1
 
 
 @pytest.mark.filesystem
@@ -697,6 +715,67 @@ def test_DR_127_assign_speakers_new_block_on_speaker_change(engine):
 # ============================================================================
 
 @pytest.mark.filesystem
+def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, tmp_path, monkeypatch):
+    """DR-214: If cancel_event is set before the pipeline daemon thread
+    completes, _run_diarization() returns None without waiting for it to finish."""
+    import threading as _threading
+
+    mono = np.ones(4096, dtype=np.float32)
+    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
+    _make_torch_mock(monkeypatch, cuda_available=False)
+
+    cancel_event = _threading.Event()
+
+    # Pipeline blocks indefinitely; cancel_event is set from the test thread.
+    pipeline_started = _threading.Event()
+
+    def slow_pipeline(inputs, batch_size=None):
+        pipeline_started.set()
+        # Block until the test is over (daemon thread, so it won't prevent exit)
+        _threading.Event().wait(timeout=30)
+        return MagicMock()
+
+    engine.pyannote.get_pipeline.return_value = slow_pipeline
+
+    wav = tmp_path / "audio.wav"
+    wav.touch()
+
+    # Set cancel_event only after the pipeline daemon thread has started.
+    def _set_cancel():
+        pipeline_started.wait(timeout=2)
+        cancel_event.set()
+
+    _threading.Thread(target=_set_cancel, daemon=True).start()
+
+    result = engine._run_diarization(wav, cancel_event=cancel_event)
+
+    assert result is None
+
+
+# ============================================================================
+# DR-244  process() — numpy array forwarding
+# ============================================================================
+
+def test_DR_244_process_forwards_numpy_array_to_transcribe(engine):
+    """DR-244: If audio is a numpy.ndarray, it is forwarded directly to
+    whisper.transcribe(); the same array reference is used."""
+    import numpy as np
+
+    audio = np.ones(mt.SAMPLE_RATE, dtype=np.float32) * 0.5
+    received = []
+
+    def fake_transcribe(arr, *a, **kw):
+        received.append(arr)
+        return []
+
+    engine.whisper.transcribe.side_effect = fake_transcribe
+
+    engine.process(audio, Path("/tmp/out"), None, False)
+
+    assert len(received) == 1
+    assert received[0] is audio
+
+
 def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, tmp_path, monkeypatch):
     """DR-214: If cancel_event is set before the pipeline daemon thread
     completes, _run_diarization() returns None without waiting for it to finish."""

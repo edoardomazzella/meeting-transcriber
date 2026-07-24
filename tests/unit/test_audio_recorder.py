@@ -20,14 +20,17 @@ test_DR_067_stop_joins_running_mic_thread                    DR-067       F-01,F
 test_DR_068_stop_skips_wait_for_absent_mic_thread            DR-068       F-01,F-04      §3.2
 test_DR_069_mute_mic_true_sets_muted_flag                    DR-069       F-06           §3.2
 test_DR_070_mute_mic_false_clears_muted_flag                 DR-070       F-06           §3.2
-test_DR_071_save_wav_raises_on_speaker_device_error          DR-071       F-03,NF-07     §3.3
-test_DR_072_save_wav_raises_on_speaker_no_audio              DR-072       F-03,NF-07     §3.3
-test_DR_073_save_wav_skips_speaker_validation_when_disabled  DR-073       F-03           §3.3
-test_DR_074_save_wav_raises_on_mic_device_error              DR-074       F-03,NF-07     §3.3
-test_DR_075_save_wav_raises_on_mic_no_audio                  DR-075       F-03,NF-07     §3.3
-test_DR_076_save_wav_skips_mic_validation_when_disabled      DR-076       F-03           §3.3
-test_DR_077_save_wav_raises_listing_all_failures             DR-077       F-03,NF-07     §3.3
-test_DR_078_save_wav_calls_on_status_and_writes_wav          DR-078       F-03,F-24      §3.3
+test_DR_071_get_mixed_audio_raises_on_speaker_device_error       DR-071       F-03,NF-07     §3.3
+test_DR_072_get_mixed_audio_raises_on_speaker_no_audio           DR-072       F-03,NF-07     §3.3
+test_DR_073_get_mixed_audio_skips_speaker_validation_when_dis    DR-073       F-03           §3.3
+test_DR_074_get_mixed_audio_raises_on_mic_device_error           DR-074       F-03,NF-07     §3.3
+test_DR_075_get_mixed_audio_raises_on_mic_no_audio               DR-075       F-03,NF-07     §3.3
+test_DR_076_get_mixed_audio_skips_mic_validation_when_dis        DR-076       F-03           §3.3
+test_DR_077_get_mixed_audio_raises_listing_all_failures          DR-077       F-03,NF-07     §3.3
+test_DR_078_get_mixed_audio_returns_array_and_clears_buffers     DR-078       F-03           §3.3
+test_DR_241_save_wav_calls_on_status_before_writing              DR-241       F-24,F-40      §3.3,§4.8
+test_DR_242_save_wav_writes_pcm16_wav_at_correct_path            DR-242       F-24,F-40      §3.3,§4.8
+test_DR_243_save_wav_returns_absolute_path                       DR-243       F-24,F-40      §3.3,§4.8
 test_DR_079_get_levels_returns_zero_when_mic_disabled        DR-079       F-07,NF-02     §3.2
 test_DR_080_get_levels_returns_zero_when_speaker_disabled    DR-080       F-07,NF-02     §3.2
 test_DR_081_get_levels_returns_zero_when_no_chunks           DR-081       F-07,NF-02     §3.2
@@ -76,6 +79,8 @@ import numpy as np
 import pytest
 
 import meeting_transcription as mt
+
+SAMPLE_RATE = mt.SAMPLE_RATE
 
 
 # ============================================================================
@@ -298,77 +303,75 @@ def test_DR_070_mute_mic_false_clears_muted_flag(rec):
 
 
 # ============================================================================
-# DR-071 to DR-078  save_wav()
+# DR-071 to DR-078  get_mixed_audio()
 # ============================================================================
 
-def test_DR_071_save_wav_raises_on_speaker_device_error(rec, tmp_path):
+def test_DR_071_get_mixed_audio_raises_on_speaker_device_error(rec):
     """DR-071: If speaker capture was enabled and a device error was recorded,
-    a RuntimeError is raised and no file is written."""
+    get_mixed_audio() raises RuntimeError."""
     rec._enable_speaker = True
     rec.speaker_error = "WASAPI device lost"
 
     with pytest.raises(RuntimeError, match="Speaker"):
-        rec.save_wav(tmp_path)
-
-    assert not (tmp_path / "mixed.wav").exists()
+        rec.get_mixed_audio()
 
 
-def test_DR_072_save_wav_raises_on_speaker_no_audio(rec, tmp_path):
-    """DR-072: If speaker capture was enabled, no error occurred, but no audio
-    was recorded, a RuntimeError is raised."""
+def test_DR_072_get_mixed_audio_raises_on_speaker_no_audio(rec):
+    """DR-072: If speaker capture was enabled, no error, but no audio was
+    recorded, get_mixed_audio() raises RuntimeError."""
     rec._enable_speaker = True
-    rec._speaker_chunks = []   # empty — no audio captured
+    rec._speaker_chunks = []
 
     with pytest.raises(RuntimeError, match="[Ss]peaker"):
-        rec.save_wav(tmp_path)
+        rec.get_mixed_audio()
 
 
-def test_DR_073_save_wav_skips_speaker_validation_when_disabled(rec, tmp_path, monkeypatch):
+def test_DR_073_get_mixed_audio_skips_speaker_validation_when_disabled(rec):
     """DR-073: If speaker capture was disabled, the speaker validation step is
-    skipped entirely — a speaker error that would normally raise does not."""
+    skipped; a speaker error that would normally raise does not."""
     rec._enable_speaker = False
-    rec.speaker_error = "some error"  # would fail if speaker is enabled
-    # Provide valid mic data so we reach the write step
+    rec.speaker_error = "some error"
     rec._enable_mic = True
     rec._mic_chunks = [np.ones(4096, dtype=np.float32) * 0.3]
-    monkeypatch.setattr(mt.sf, "write", MagicMock())
 
-    rec.save_wav(tmp_path)  # must not raise
+    result = rec.get_mixed_audio()  # must not raise
+
+    assert isinstance(result, np.ndarray)
 
 
-def test_DR_074_save_wav_raises_on_mic_device_error(rec, tmp_path):
-    """DR-074: If mic capture was enabled and a device error was recorded, a
-    RuntimeError is raised."""
+def test_DR_074_get_mixed_audio_raises_on_mic_device_error(rec):
+    """DR-074: If mic capture was enabled and a device error was recorded,
+    get_mixed_audio() raises RuntimeError."""
     rec._enable_mic = True
     rec.mic_error = "mic unplugged"
 
     with pytest.raises(RuntimeError, match="[Mm]icrophone"):
-        rec.save_wav(tmp_path)
+        rec.get_mixed_audio()
 
 
-def test_DR_075_save_wav_raises_on_mic_no_audio(rec, tmp_path):
-    """DR-075: If mic capture was enabled, no error occurred, but no audio was
-    recorded, a RuntimeError is raised."""
+def test_DR_075_get_mixed_audio_raises_on_mic_no_audio(rec):
+    """DR-075: If mic capture was enabled, no error, but no audio was recorded,
+    get_mixed_audio() raises RuntimeError."""
     rec._enable_mic = True
     rec._mic_chunks = []
 
     with pytest.raises(RuntimeError, match="[Mm]icrophone"):
-        rec.save_wav(tmp_path)
+        rec.get_mixed_audio()
 
 
-def test_DR_076_save_wav_skips_mic_validation_when_disabled(rec, tmp_path, monkeypatch):
+def test_DR_076_get_mixed_audio_skips_mic_validation_when_disabled(rec):
     """DR-076: If mic capture was disabled, the mic validation step is skipped."""
     rec._enable_mic = False
-    rec.mic_error = "some error"  # would fail if mic is enabled
-    # Provide valid speaker data
+    rec.mic_error = "some error"
     rec._enable_speaker = True
     rec._speaker_chunks = [np.ones(4096, dtype=np.float32) * 0.3]
-    monkeypatch.setattr(mt.sf, "write", MagicMock())
 
-    rec.save_wav(tmp_path)  # must not raise
+    result = rec.get_mixed_audio()  # must not raise
+
+    assert isinstance(result, np.ndarray)
 
 
-def test_DR_077_save_wav_raises_listing_all_failures(rec, tmp_path):
+def test_DR_077_get_mixed_audio_raises_listing_all_failures(rec):
     """DR-077: If multiple validation failures occur, a single RuntimeError lists
     all of them."""
     rec._enable_speaker = True
@@ -377,18 +380,16 @@ def test_DR_077_save_wav_raises_listing_all_failures(rec, tmp_path):
     rec.mic_error = "mic device lost"
 
     with pytest.raises(RuntimeError) as exc_info:
-        rec.save_wav(tmp_path)
+        rec.get_mixed_audio()
 
     msg = str(exc_info.value)
     assert "Speaker" in msg or "speaker" in msg
     assert "Microphone" in msg or "mic" in msg.lower()
 
 
-@pytest.mark.filesystem
-def test_DR_078_save_wav_calls_on_status_and_writes_wav(rec, tmp_path):
-    """DR-078: If all validations pass, on_status is called with 'Preparing
-    audio...', the streams are mixed and normalised, a WAV file is written at
-    output_dir/mixed.wav, and that path is returned.  Chunks are cleared."""
+def test_DR_078_get_mixed_audio_returns_array_and_clears_buffers(rec):
+    """DR-078: If all validations pass, on_status is called, _mix() is called,
+    buffers are cleared, and the float32 numpy array is returned."""
     rec._enable_speaker = True
     rec._enable_mic = True
     rec._speaker_chunks = [np.ones(4096, dtype=np.float32) * 0.4]
@@ -396,13 +397,64 @@ def test_DR_078_save_wav_calls_on_status_and_writes_wav(rec, tmp_path):
 
     status_calls = []
 
-    result = rec.save_wav(tmp_path, on_status=status_calls.append)
+    result = rec.get_mixed_audio(on_status=status_calls.append)
 
     assert status_calls == ["Preparing audio..."]
+    assert isinstance(result, np.ndarray)
+    assert result.dtype == np.float32
+    assert len(result) > 0
+    assert rec._speaker_chunks == [], "buffers must be cleared after mixing"
+    assert rec._mic_chunks == [], "buffers must be cleared after mixing"
+
+
+# ============================================================================
+# DR-241 to DR-243  save_wav(output_dir, audio)
+# ============================================================================
+
+@pytest.mark.filesystem
+def test_DR_241_save_wav_calls_on_status_before_writing(rec, tmp_path, monkeypatch):
+    """DR-241: If on_status is provided, it is called with 'Saving audio...'
+    before writing; if omitted, no callback is made."""
+    audio = np.ones(4096, dtype=np.float32) * 0.5
+    status_calls = []
+    mock_write = MagicMock()
+    monkeypatch.setattr(mt.sf, "write", mock_write)
+
+    rec.save_wav(tmp_path, audio, on_status=status_calls.append)
+
+    assert status_calls == ["Saving audio..."]
+    # No callback when omitted
+    status_calls.clear()
+    rec.save_wav(tmp_path, audio)
+    assert status_calls == []
+
+
+@pytest.mark.filesystem
+def test_DR_242_save_wav_writes_pcm16_wav_at_correct_path(rec, tmp_path):
+    """DR-242: The float32 array is written as PCM_16 WAV at output_dir/mixed.wav."""
+    audio = np.ones(SAMPLE_RATE, dtype=np.float32) * 0.3
+
+    result = rec.save_wav(tmp_path, audio)
+
     assert result == tmp_path / "mixed.wav"
     assert result.exists()
-    assert rec._speaker_chunks == [], "chunks must be cleared after mixing"
-    assert rec._mic_chunks == [], "chunks must be cleared after mixing"
+    # Verify the file is a valid WAV by reading it back
+    import soundfile as sf_check
+    data, sr = sf_check.read(str(result))
+    assert sr == SAMPLE_RATE
+    assert len(data) == SAMPLE_RATE
+
+
+@pytest.mark.filesystem
+def test_DR_243_save_wav_returns_absolute_path(rec, tmp_path, monkeypatch):
+    """DR-243: The absolute path of the written file is returned."""
+    audio = np.zeros(1024, dtype=np.float32)
+    monkeypatch.setattr(mt.sf, "write", MagicMock())
+
+    result = rec.save_wav(tmp_path, audio)
+
+    assert result == tmp_path / "mixed.wav"
+    assert result.is_absolute()
 
 
 # ============================================================================

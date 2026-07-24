@@ -41,6 +41,7 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 | F-07 | The system shall display real-time audio level indicators for each active source during recording |
 | F-08 | The system shall display a timer showing elapsed recording time |
 | F-09 | At least one audio source shall be active to start a recording |
+| F-42 | The Start Recording control shall be enabled only when at least one audio source is active (F-09) and at least one output is enabled (transcription or WAV saving); if both transcription and WAV saving are disabled, Start Recording shall be disabled regardless of audio source selection |
 
 ### 3.2 Transcription
 
@@ -53,7 +54,7 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 | F-14 | The user shall be able to cancel an in-progress transcription |
 | F-15 | A cancelled transcription shall produce a partial transcript for any already-processed audio |
 | F-16 | The user shall be able to transcribe a pre-existing audio file (WAV format) |
-| F-36 | When enabled via configuration, the system shall begin transcribing audio concurrently with an active recording session, without waiting for the session to end |
+| F-36 | When transcription is enabled, the system shall always begin transcribing audio concurrently with an active recording session, without waiting for the session to end |
 | F-37 | Transcribed segments shall be accumulated in memory during the recording session and reused in the final transcript, so that only the audio not yet processed by the live pipeline is submitted to Whisper after recording stops |
 | F-38 | Live transcription shall stop automatically when the user stops the recording, before post-recording processing begins |
 
@@ -73,10 +74,12 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 | F-21 | Each session shall be saved in a dedicated folder identified by date and time |
 | F-22 | The system shall produce a transcript file with timestamps for each speech segment |
 | F-23 | When speaker identification is enabled, the system shall produce a separate transcript file including speaker labels |
-| F-24 | The recorded audio shall be saved alongside the transcript files |
+| F-24 | When WAV saving is enabled (see F-40), the recorded audio shall be saved alongside the transcript files |
 | F-25 | Existing output files shall never be overwritten |
 | F-35 | Upon processing completion the user shall be offered the option to open the output folder directly from the notification dialog |
 | F-39 | When live transcription is active, the session output folder shall be created at the moment recording begins so that the live pipeline thread and post-processing use the same output path |
+| F-40 | The user shall be able to enable or disable saving of the recorded audio file (WAV) via a UI checkbox; when disabled, audio data shall be processed entirely in memory and no WAV file shall be written to disk |
+| F-41 | The WAV saving option shall default to disabled; saving shall only occur when the user has explicitly enabled it |
 
 ### 3.5 Model & Token Management
 
@@ -93,7 +96,7 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 
 | ID | Requirement |
 |---|---|
-| F-32 | The user's UI preferences (selected sources, language, devices) shall be restored at each startup |
+| F-32 | The following user preferences shall be persisted and restored at each startup: enabled audio sources (microphone, speaker loopback); selected microphone device; selected speaker device; transcription enabled/disabled; transcription language; speaker identification enabled/disabled; WAV saving enabled/disabled |
 | F-33 | Application parameters (model variant, inference settings) shall be configurable via a plain-text file |
 | F-34 | Access tokens shall be stored securely in the operating system's credential store |
 
