@@ -98,7 +98,7 @@ The application runs on Windows, captures audio from microphone and/or speaker o
 |---|---|
 | F-32 | The following user preferences shall be persisted and restored at each startup: enabled audio sources (microphone, speaker loopback); selected microphone device; selected speaker device; transcription enabled/disabled; transcription language; speaker identification enabled/disabled; WAV saving enabled/disabled |
 | F-33 | Application parameters (model variant, inference settings) shall be configurable via a plain-text file |
-| F-34 | Access tokens shall be stored securely in the operating system's credential store |
+| F-34 | Access tokens shall be stored in the operating system's credential store when available; if unavailable or failing, a local fallback storage may be used |
 
 ---
 

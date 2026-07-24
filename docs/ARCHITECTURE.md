@@ -282,6 +282,8 @@ sequenceDiagram
     end
 ```
 
+If the OS credential store is unavailable, or `set_password/get_password` fails at runtime, the application uses the local fallback token file (`models/pyannote/token.txt`) and continues the same download flow.
+
 ### 3.5 WAV File Transcription
 
 A pre-recorded audio file can be transcribed without starting a new recording session (F-16). `MainWindow` presents a file-open dialog and delegates directly to `TranscriptionEngine`, bypassing `AudioRecorder`.
@@ -599,7 +601,7 @@ The **Architecture Ref** column contains section numbers within *this document*:
 | F-31 | Manual model re-installation | MainWindow | §3.1, §3.7, §4.6 | DR-164, DR-165, DR-201–DR-206 |
 | F-32 | Restore UI preferences at startup (incl. WAV saving state, F-40) | MainWindow | §3.7, §4.4 | DR-004–DR-008, DR-180, DR-182, DR-207–DR-209 |
 | F-33 | Configurable parameters via plain-text file | MainWindow (startup) | §3.6, §4.4 | DR-001–DR-003 |
-| F-34 | Secure token storage in OS credential store | DiarizationEngine | §3.4 | DR-029–DR-050 |
+| F-34 | Store token in OS credential store when available, else local fallback | DiarizationEngine | §3.4 | DR-029–DR-050 |
 | F-40 | Enable/disable WAV saving to disk via UI checkbox | AudioRecorder, MainWindow | §3.3, §4.6, §4.8 | — |
 | F-41 | WAV saving defaults to disabled on first run | MainWindow | §3.7, §4.4 | — |
 | F-42 | Start Recording requires ≥1 source and ≥1 output enabled (transcription or WAV saving) | MainWindow | §4.6 | — |

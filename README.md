@@ -105,7 +105,7 @@ Diarization requires a free [HuggingFace](https://huggingface.co/) token:
 3. Generate a token at [Settings → Access Tokens](https://huggingface.co/settings/tokens)
 4. Enter it in the dialog that appears on first launch
 
-The token is stored securely in the **Windows Credential Manager**.
+The token is stored in **Windows Credential Manager** when available. If credential-store access is unavailable, a local fallback file is used.
 
 ## CUDA Versions
 
