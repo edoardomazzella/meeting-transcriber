@@ -24,7 +24,6 @@
 | `_KEYRING_SERVICE` | `"MeetingTranscription"` | Service name used for OS credential store |
 | `_KEYRING_USERNAME` | `"huggingface_token"` | Username key used for OS credential store |
 | `_KEYRING_AVAILABLE` | `bool` | `True` if the `keyring` package was successfully imported |
-| `PIPELINE_TRANSCRIPTION` | `bool` | `True` if live in-session transcription is enabled (from `config.json`) |
 | `PIPELINE_CHUNK_SECONDS` | `int` | Duration in seconds of each live transcription chunk; minimum 3 (from `config.json`) |
 
 ### 1.2 Configuration defaults
@@ -35,7 +34,6 @@ _CONFIG_DEFAULTS = {
     "model_size":   "medium",
     "beam_size":    5,
     "vad":          True,
-    "pipeline_transcription": False,
     "pipeline_chunk_seconds": 10,
 }
 
@@ -995,7 +993,7 @@ Reads current source/device selections, shows level meters, resets mute button, 
 
 #### `_start_live_pipeline(language: str | None) -> None`
 
-Resets segment accumulator and counters, then starts the `_run_live_pipeline` background thread. Called from `_start_recording()` when `PIPELINE_TRANSCRIPTION` is `True` and Whisper is ready.
+Resets segment accumulator and counters, then starts the `_run_live_pipeline` background thread. Called from `_start_recording()` when transcription is enabled and Whisper is ready.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -1594,7 +1592,7 @@ This section provides full, function-level traceability from every element of `A
 | Click "Start Recording" | `MainWindow._start_recording()` §8.5 |
 | Create output folder at recording start | `MainWindow._start_recording()` §8.5 (DR-229) |
 | `start(mic, speaker, device IDs)` | `AudioRecorder.start()` §5.2 |
-| Start live pipeline thread (if enabled) | `MainWindow._start_live_pipeline()` §8.5 |
+| Start live pipeline thread | `MainWindow._start_live_pipeline()` §8.5 |
 | Start level meter timer | `MainWindow._start_recording()` §8.5 — starts 80 ms QTimer |
 | `get_levels()` per tick | `AudioRecorder.get_levels()` §5.2 |
 | Update level bars | `MainWindow._update_levels()` §8.6 |
@@ -1740,7 +1738,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 |---|---|---|---|
 | DR-029–DR-032 | __init__() | F-34, NF-09 | §3.4 |
 | DR-033–DR-035 | is_installed() | F-27 | §3.1 |
-| DR-036–DR-039 | 	oken_exists() | F-27, F-29, F-34, NF-09 | §3.4 |
+| DR-036–DR-039 | token_exists() | F-27, F-29, F-34, NF-09 | §3.4 |
 | DR-040–DR-043 | load_token() | F-28, F-34, NF-09 | §3.4 |
 | DR-044–DR-046 | save_token() | F-34, NF-09, NF-10 | §3.4 |
 | DR-047–DR-050 | delete_token() | F-30, F-34 | §3.4 |

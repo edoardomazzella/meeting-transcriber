@@ -317,7 +317,7 @@ sequenceDiagram
 
 ### 3.6 Live Pipeline Transcription
 
-When `pipeline_transcription` is enabled in `config.json` and Whisper is ready, a live pipeline thread starts at the same time as `AudioRecorder.start()`. It polls the accumulating audio buffer every `PIPELINE_CHUNK_SECONDS` seconds, runs Whisper on each in-memory audio slice (numpy float32 array — no temporary WAV file), and **stores the returned segments in memory** alongside their base-time offset. No output file is written during recording. When the user clicks Stop, the live thread is joined and post-processing begins using the accumulated segments plus a tail transcription of any remaining audio (passed as a numpy array), producing the standard `transcript.txt` (and optionally `transcript_diarized.txt`) with reduced wait time.
+When transcription is enabled and Whisper is ready, a live pipeline thread starts at the same time as `AudioRecorder.start()`. It polls the accumulating audio buffer every `PIPELINE_CHUNK_SECONDS` seconds, runs Whisper on each in-memory audio slice (numpy float32 array — no temporary WAV file), and **stores the returned segments in memory** alongside their base-time offset. No output file is written during recording. When the user clicks Stop, the live thread is joined and post-processing begins using the accumulated segments plus a tail transcription of any remaining audio (passed as a numpy array), producing the standard `transcript.txt` (and optionally `transcript_diarized.txt`) with reduced wait time.
 
 ```mermaid
 sequenceDiagram

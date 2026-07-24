@@ -42,7 +42,6 @@ _CONFIG_DEFAULTS = {
     "compute_type_gpu":    "int8_float16",
     "chunk_length":        30,
     "pyannote_batch_size": 16,
-    "pipeline_transcription": False,
     "pipeline_chunk_seconds": 10,
 }
 
@@ -68,7 +67,6 @@ CPU_THREADS       = int(_cfg["cpu_threads"])
 COMPUTE_TYPE_GPU  = _cfg["compute_type_gpu"]
 CHUNK_LENGTH      = int(_cfg["chunk_length"])
 PYANNOTE_BATCH    = int(_cfg["pyannote_batch_size"])
-PIPELINE_TRANSCRIPTION = bool(_cfg.get("pipeline_transcription", False))
 PIPELINE_CHUNK_SECONDS = max(3, int(_cfg.get("pipeline_chunk_seconds", 10)))
 
 _SETTINGS_FILE = SCRIPT_DIR / "settings.json"
@@ -1488,7 +1486,7 @@ class MainWindow(QWidget):
         self.mute_mic_button.setChecked(False)
         self.mute_mic_button.setText("Mute Mic")
 
-        if PIPELINE_TRANSCRIPTION and self.transcribe_checkbox.isChecked() and self.whisper_ready:
+        if self.transcribe_checkbox.isChecked() and self.whisper_ready:
             self._start_live_pipeline(self.language_combo.currentData())
 
     def _start_live_pipeline(self, language):

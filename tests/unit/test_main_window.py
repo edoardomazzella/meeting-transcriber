@@ -110,6 +110,7 @@ test_DR_226_run_live_pipeline_deletes_temp_wav_on_exit           DR-226    F-36 
 test_DR_227_stop_live_pipeline_joins_thread                      DR-227    F-38             §3.6
 test_DR_228_stop_live_pipeline_logs_warning_on_timeout           DR-228    F-38             §3.6
 test_DR_229_start_recording_creates_output_folder                DR-229    F-39             §3.6
+test_F36_start_recording_starts_live_pipeline_when_transcribe_on    —       F-36             §3.6
 test_DR_230_stop_recording_calls_stop_live_pipeline              DR-230    F-38             §3.6
 test_DR_231_process_recording_reuses_recording_output_dir        DR-231    F-10,F-21,F-39   §3.3,§3.6
 test_DR_232_process_recording_calls_process_with_live_segments    DR-232    F-37             §3.6
@@ -2028,7 +2029,6 @@ def test_DR_229_start_recording_creates_output_folder(win, tmp_path, monkeypatch
     """DR-229: The session output folder is created when recording starts, not
     when it stops; _recording_output_dir is set before recorder.start()."""
     monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(mt, "PIPELINE_TRANSCRIPTION", False)
 
     created_dirs = []
     original_recorder_start = win.recorder.start
@@ -2046,6 +2046,28 @@ def test_DR_229_start_recording_creates_output_folder(win, tmp_path, monkeypatch
     assert len(created_dirs) == 1
     assert created_dirs[0].parent == tmp_path
     assert created_dirs[0].exists()
+
+
+@pytest.mark.qt
+def test_F36_start_recording_starts_live_pipeline_when_transcribe_on(win, monkeypatch):
+    """F-36 regression guard: with transcription enabled and Whisper ready,
+    _start_recording() always starts the live pipeline thread."""
+    win.whisper_ready = True
+    win._whisper_loading = False
+    win.transcribe_checkbox.setEnabled(True)
+    win.transcribe_checkbox.setChecked(True)
+
+    live_calls = []
+    monkeypatch.setattr(win, "_start_live_pipeline", lambda language: live_calls.append(language))
+    win.recorder.start = MagicMock()
+
+    win._start_recording()
+
+    assert len(live_calls) == 1
+
+    # Keep fixture teardown deterministic.
+    win.recording = False
+    win._level_timer.stop()
 
 
 # ============================================================================
