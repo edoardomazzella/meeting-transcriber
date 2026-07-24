@@ -1425,6 +1425,8 @@ class MainWindow(QWidget):
     def _start_recording(self):
         self.recording = True
         self.start_time = time.monotonic()
+        # Apply centralized state logic immediately on Recording transition.
+        self._update_controls()
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.language_combo.setEnabled(False)
@@ -1534,9 +1536,10 @@ class MainWindow(QWidget):
         language = self.language_combo.currentData()
         enable_transcription = self.transcribe_checkbox.isChecked()
         enable_diarization = self.diarization_checkbox.isChecked()
+        save_wav_enabled = self.save_wav_checkbox.isChecked()
         threading.Thread(
             target=self._process_recording,
-            args=(language, enable_transcription, enable_diarization),
+            args=(language, enable_transcription, enable_diarization, save_wav_enabled),
             daemon=True,
         ).start()
     def _on_transcribe_wav_clicked(self):
@@ -1578,7 +1581,7 @@ class MainWindow(QWidget):
             self.signals.error.emit(str(e))
     # ── Processing ────────────────────────────────────────────────────────────
 
-    def _process_recording(self, language, enable_transcription, enable_diarization):
+    def _process_recording(self, language, enable_transcription, enable_diarization, save_wav_enabled=False):
         try:
             d = self._recording_output_dir
             if d is None:
@@ -1591,7 +1594,7 @@ class MainWindow(QWidget):
 
             # Optionally persist to WAV on disk (DR-245, F-40)
             wav_path = None
-            if self.save_wav_checkbox.isChecked():
+            if save_wav_enabled:
                 try:
                     wav_path = self.recorder.save_wav(d, audio, self.signals.status_changed.emit)
                 except Exception as e:

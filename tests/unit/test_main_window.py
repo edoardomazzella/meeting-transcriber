@@ -37,6 +37,7 @@ test_DR_148_start_recording_shows_mic_meter_when_checked         DR-148    F-01,
 test_DR_149_start_recording_hides_mic_meter_when_unchecked       DR-149    F-01,F-02,F-07   §3.2
 test_DR_150_start_recording_shows_spk_meter_when_checked         DR-150    F-01,F-02,F-07   §3.2
 test_DR_151_start_recording_hides_spk_meter_when_unchecked       DR-151    F-01,F-02,F-07   §3.2
+test_DR_252_start_recording_locks_state_dependent_controls       DR-252    F-16,F-40,F-42,NF-12 §3.2,§4.6
 test_DR_152_stop_recording_resets_state_and_starts_processing    DR-152    F-10,F-21        §3.2,§3.3
 test_DR_153_process_recording_emits_error_on_save_wav_fail       DR-153    F-03,NF-07       §3.3
 test_DR_154_process_recording_emits_finished_when_no_transcribe  DR-154    F-10,F-11        §3.3
@@ -127,6 +128,7 @@ CI safety
 
 import json
 import logging
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -631,6 +633,31 @@ def test_DR_151_start_recording_hides_spk_meter_when_unchecked(win):
     assert win.recorder.start.call_args.kwargs.get("enable_speaker") is False
 
 
+@pytest.mark.qt
+def test_DR_252_start_recording_locks_state_dependent_controls(win):
+    """DR-252: entering Recording state must lock state-dependent controls
+    through the same centralized state transition used by _update_controls()."""
+    win.whisper_ready = True
+    win._whisper_loading = False
+    win._processing = False
+    win.recording = False
+    win.mic_checkbox.setChecked(True)
+    win.save_wav_checkbox.setChecked(True)
+    win.recorder.start = MagicMock()
+
+    # Precondition: in Idle with Whisper ready, these controls are enabled.
+    win._update_controls()
+    assert win.transcribe_wav_button.isEnabled()
+    assert win.save_wav_checkbox.isEnabled()
+
+    win._start_recording()
+    win.recording = False
+    win._level_timer.stop()
+
+    assert not win.transcribe_wav_button.isEnabled()
+    assert not win.save_wav_checkbox.isEnabled()
+
+
 # ============================================================================
 # DR-152  _stop_recording()
 # ============================================================================
@@ -703,7 +730,7 @@ def test_DR_153_process_recording_emits_error_on_save_wav_fail(win, tmp_path, mo
     errors = []
     win.signals.error.connect(errors.append)
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     assert len(errors) == 1
 
@@ -725,7 +752,7 @@ def test_DR_154_process_recording_emits_finished_when_no_transcribe(win, tmp_pat
     finished = []
     win.signals.finished.connect(lambda folder, file: finished.append(file))
 
-    win._process_recording(None, enable_transcription=False, enable_diarization=False)
+    win._process_recording(None, enable_transcription=False, enable_diarization=False, save_wav_enabled=True)
 
     assert len(finished) == 1
     assert str(fake_wav) in finished[0]
@@ -743,7 +770,7 @@ def test_DR_155_process_recording_emits_error_on_engine_fail(win, tmp_path, monk
     errors = []
     win.signals.error.connect(errors.append)
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     assert len(errors) == 1
 
@@ -761,7 +788,7 @@ def test_DR_156_process_recording_emits_finished_on_success(win, tmp_path, monke
     finished = []
     win.signals.finished.connect(lambda f, t: finished.append(t))
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     assert len(finished) == 1
     assert str(fake_transcript) in finished[0]
@@ -787,7 +814,7 @@ def test_DR_157_process_recording_emits_cancelled_on_cancel(win, tmp_path, monke
     cancelled = []
     win.signals.cancelled.connect(cancelled.append)
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     assert len(cancelled) == 1
 
@@ -2071,7 +2098,7 @@ def test_DR_231_process_recording_reuses_recording_output_dir(win, tmp_path, mon
     finished = []
     win.signals.finished.connect(lambda f, t: finished.append(f))
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     assert len(finished) == 1
     assert finished[0] == str(existing_dir)
@@ -2112,7 +2139,7 @@ def test_DR_232_process_recording_calls_process_with_live_segments(win, tmp_path
     finished = []
     win.signals.finished.connect(lambda f, t: finished.append(t))
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     assert len(called_with) == 1
     assert isinstance(called_with[0], np.ndarray)
@@ -2266,7 +2293,7 @@ def test_DR_245_process_recording_saves_wav_when_checkbox_enabled(win, tmp_path,
     win.engine.process = MagicMock(return_value=tmp_path / "transcript.txt")
     win.save_wav_checkbox.setChecked(True)
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, True)
 
     win.recorder.save_wav.assert_called_once()
     call_args = win.recorder.save_wav.call_args
@@ -2283,7 +2310,7 @@ def test_DR_245_process_recording_no_wav_when_checkbox_disabled(win, tmp_path, m
     win.engine.process = MagicMock(return_value=tmp_path / "transcript.txt")
     win.save_wav_checkbox.setChecked(False)
 
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, False)
 
     win.recorder.save_wav.assert_not_called()
 
@@ -2301,10 +2328,50 @@ def test_DR_246_process_recording_emits_error_when_save_wav_fails(win, tmp_path,
 
     errors = []
     win.signals.error.connect(errors.append)
-    win._process_recording(None, True, False)
+    win._process_recording(None, True, False, True)
 
     assert len(errors) == 1
     win.engine.process.assert_not_called()
+
+
+@pytest.mark.qt
+def test_DR_253_process_recording_uses_snapshot_not_ui_widget(win, tmp_path, monkeypatch):
+    """DR-253: _process_recording() must not read Qt widget state directly.
+
+    The worker path should rely only on UI-thread snapshots passed as inputs.
+    """
+    import numpy as np
+
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, np.float32))
+    win.recorder.save_wav = MagicMock()
+    win.engine.process = MagicMock(return_value=tmp_path / "transcript.txt")
+
+    original_is_checked = mt.QCheckBox.isChecked
+
+    def guarded_is_checked(checkbox):
+        stack_fns = [frame.function for frame in inspect.stack()]
+        if (
+            checkbox is win.save_wav_checkbox
+            and "_process_recording" in stack_fns
+            and "_outputs_enabled" not in stack_fns
+        ):
+            raise AssertionError("save_wav_checkbox.isChecked accessed in worker path")
+        return original_is_checked(checkbox)
+
+    monkeypatch.setattr(mt.QCheckBox, "isChecked", guarded_is_checked)
+
+    _suppress_dialog_slot(win, "error")
+    errors = []
+    finished = []
+    win.signals.error.connect(errors.append)
+    win.signals.finished.connect(lambda folder, file: finished.append((folder, file)))
+
+    win._process_recording(None, True, False, False)
+
+    assert errors == []
+    assert len(finished) == 1
+    win.engine.process.assert_called_once()
 
 
 @pytest.mark.qt

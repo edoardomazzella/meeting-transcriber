@@ -990,6 +990,7 @@ Reads current source/device selections, shows level meters, resets mute button, 
 | DR-150 | If the speaker checkbox is checked, the speaker level meter is shown and speaker capture is enabled. |
 | DR-151 | If the speaker checkbox is unchecked, the speaker level meter is hidden and speaker capture is disabled. |
 | DR-229 | The session output folder is created at the moment recording starts (not when it stops); this folder is stored in `_recording_output_dir` so both the live pipeline and post-processing use the same path. |
+| DR-252 | After `recording` is set to `True`, `_update_controls()` is called in the same transition so all state-dependent controls are coherently locked for the Recording state (including WAV saving toggle and WAV-file transcription action), regardless of any previous enabled state. |
 ---
 
 #### `_start_live_pipeline(language: str | None) -> None`
@@ -1060,6 +1061,7 @@ Creates the output folder, calls `recorder.save_wav`, then `engine.process`. Emi
 | DR-153 | `recorder.get_mixed_audio()` is called to mix and normalise captured audio in memory; if it raises `RuntimeError`, an error signal is emitted and no further processing occurs. |
 | DR-245 | After `get_mixed_audio()` returns the audio numpy array, if WAV saving is enabled (F-40), `recorder.save_wav(output_dir, audio)` is called to write `mixed.wav` at `output_dir / "mixed.wav"`; the returned path is stored for use in the completion signal. If WAV saving is disabled, no file is written to disk. |
 | DR-246 | If WAV saving is enabled and `save_wav()` raises any exception, an error signal is emitted and no further processing occurs. |
+| DR-253 | `_process_recording()` (background thread) must not read Qt widget state directly. Any UI-derived decision used by this method (including whether WAV saving is enabled) must be captured on the UI thread before worker start and passed as an immutable input to avoid cross-thread UI access and nondeterministic behavior. |
 | DR-154 | If `enable_transcription` is `False` (WAV saving must be enabled by F-42 in this case), the path of the written `mixed.wav` is emitted via `finished` and the method returns without calling the transcription engine. |
 | DR-155 | If the transcription engine raises an error, an error signal is emitted. |
 | DR-156 | If transcription completes normally without cancellation, the path of the produced transcript is emitted as the result. |
@@ -1811,13 +1813,13 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 
 | DR range | Implementing Method | SRS IDs | Architecture Ref |
 |---|---|---|---|
-| DR-148–DR-151 | _start_recording() | F-01, F-02, F-03, F-07 | §3.2 |
+| DR-148–DR-151, DR-252 | _start_recording() | F-01, F-02, F-03, F-07, F-16, F-40, F-42, NF-12 | §3.2, §4.6 |
 | DR-229 | _start_recording() — folder at start | F-39 | §3.6 |
 | DR-220–DR-221 | _start_live_pipeline() | F-36, F-37 | §3.6 |
 | DR-222–DR-226 | _run_live_pipeline() | F-36, F-37 | §3.6, §4.8 |
 | DR-227–DR-228 | _stop_live_pipeline() | F-38 | §3.6 |
 | DR-152, DR-230 | _stop_recording() | F-10, F-21, F-38 | §3.2, §3.3, §3.6 |
-| DR-153–DR-157, DR-231–DR-233, DR-245–DR-246 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, F-37, F-40, F-42, NF-07, NF-08 | §3.3, §3.6, §4.8 |
+| DR-153–DR-157, DR-231–DR-233, DR-245–DR-246, DR-253 | _process_recording() | F-10, F-11, F-14, F-15, F-22, F-24, F-37, F-40, F-42, NF-05, NF-07, NF-08 | §3.3, §3.6, §4.8 |
 | DR-234–DR-239 | _process_with_live_segments() | F-37 | §3.6, §4.8 |
 | DR-158–DR-160 | _transcribe_wav_file() | F-14, F-15, F-16, NF-05, NF-08 | §3.5 |
 
