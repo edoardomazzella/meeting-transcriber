@@ -1,4 +1,4 @@
-"""
+﻿"""
 tests/test_module_functions.py
 ==============================
 Unit tests for module-level functions — DR-001 to DR-016.
@@ -23,6 +23,7 @@ test_DR_013_format_timestamp_between_60_and_3600s       DR-013  F-22,F-23 §3.3
 test_DR_014_format_timestamp_over_3600_seconds          DR-014  F-22,F-23 §3.3
 test_DR_015_get_audio_devices_returns_populated_lists   DR-015  F-04,F-05 §3.2
 test_DR_016_get_audio_devices_returns_empty_on_error    DR-016  NF-07,NF-08 §3.2
+test_DR_256_worker_env_flag_skips_instance_guard        DR-256  NF-09     §4.3
 
 CI safety
 ---------
@@ -277,3 +278,62 @@ def test_DR_016_get_audio_devices_returns_empty_lists_on_any_exception(monkeypat
 
     assert mics == []
     assert speakers == []
+
+
+# ============================================================================
+# DR-256  Module-level single-instance guard bypass
+# ============================================================================
+
+def test_DR_256_worker_env_flag_skips_instance_guard(monkeypatch):
+    """DR-256: When MEETING_TRANSCRIBER_WORKER is set to a non-empty value at
+    module import time, the single-instance socket bind on port 47832 is
+    skipped.  Verified by AST-inspecting the guard block in the live source:
+    the bind call must be nested inside an ``if not os.environ.get(...)``
+    branch, so importing with that flag set never reaches bind()."""
+    import ast, inspect, textwrap
+
+    # Locate the guard block in the module source
+    source = inspect.getsource(mt)
+
+    tree = ast.parse(source)
+
+    # Walk top-level If nodes looking for the MEETING_TRANSCRIBER_WORKER check
+    guard_found = False
+    bind_inside_guard = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        # Match: if not os.environ.get("MEETING_TRANSCRIBER_WORKER")
+        test = node.test
+        if (
+            isinstance(test, ast.UnaryOp)
+            and isinstance(test.op, ast.Not)
+            and isinstance(test.operand, ast.Call)
+        ):
+            call = test.operand
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "get"
+                and any(
+                    isinstance(a, ast.Constant) and "MEETING_TRANSCRIBER_WORKER" in str(a.value)
+                    for a in call.args
+                )
+            ):
+                guard_found = True
+                # Verify that a .bind() call lives inside this branch
+                for child in ast.walk(node):
+                    if (
+                        isinstance(child, ast.Call)
+                        and isinstance(child.func, ast.Attribute)
+                        and child.func.attr == "bind"
+                    ):
+                        bind_inside_guard = True
+
+    assert guard_found, (
+        "MEETING_TRANSCRIBER_WORKER guard not found in module source — "
+        "single-instance bind may run unconditionally in worker subprocesses"
+    )
+    assert bind_inside_guard, (
+        "socket.bind() is not nested inside the MEETING_TRANSCRIBER_WORKER guard — "
+        "worker subprocesses would try to bind the already-held port"
+    )

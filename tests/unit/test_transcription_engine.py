@@ -1,7 +1,7 @@
-"""
+﻿"""
 tests/test_transcription_engine.py
 ===================================
-Unit tests for TranscriptionEngine — DR-098 to DR-127, DR-214.
+Unit tests for TranscriptionEngine — DR-098 to DR-127, DR-214, DR-254–DR-255.
 
 All external dependencies are mocked:
   WhisperManager  → MagicMock injected via constructor
@@ -45,6 +45,8 @@ test_DR_125_assign_speakers_isolated_word_reassigned         DR-125       F-17,F
 test_DR_126_assign_speakers_consecutive_words_merged         DR-126       F-17,F-20      §3.3
 test_DR_127_assign_speakers_new_block_on_speaker_change      DR-127       F-17,F-20      §3.3
 test_DR_214_run_diarization_returns_none_when_cancel_set     DR-214       F-14,F-15      §3.3,§4.1
+test_DR_254_run_diarization_respawns_worker_after_cancel     DR-254       F-14,F-15      §3.3,§4.1
+test_DR_255_run_diarization_raises_on_unexpected_worker_death DR-255      F-14,F-15      §3.3,§4.1
 
 CI safety
 ---------
@@ -56,6 +58,7 @@ CI safety
 
 import sys
 import threading
+import queue
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -126,6 +129,39 @@ def _make_torch_mock(monkeypatch, cuda_available=False):
     return mock_torch
 
 
+def _make_pa_mock(monkeypatch, pipeline_result=None):
+    """Inject a minimal pyannote.audio mock into sys.modules.
+
+    `Pipeline.from_pretrained(...)` returns a callable pipeline whose call
+    returns an object with `.exclusive_speaker_diarization == pipeline_result`.
+    """
+    mock_pa = MagicMock()
+    mock_result = MagicMock()
+    mock_result.exclusive_speaker_diarization = pipeline_result
+    mock_pa.Pipeline.from_pretrained.return_value = MagicMock(return_value=mock_result)
+    monkeypatch.setitem(sys.modules, "pyannote.audio", mock_pa)
+    return mock_pa
+
+
+class _FakeDiarProcess:
+    """Stand-in for multiprocessing.Process — controllable without spawning
+    a real OS process (per repo convention: patch worker target/process with
+    plain top-level substitutes rather than real multiprocessing in tests)."""
+    def __init__(self):
+        self._alive = True
+        self.killed = False
+
+    def is_alive(self):
+        return self._alive
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+
+    def join(self, timeout=None):
+        pass
+
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -139,15 +175,33 @@ def wm():
 
 
 @pytest.fixture()
-def pm():
+def pm(tmp_path):
     """Mock PyannoteManager."""
-    return MagicMock(spec=mt.PyannoteManager)
+    m = MagicMock(spec=mt.PyannoteManager)
+    m.models_dir = tmp_path
+    m.load_token.return_value = "fake-token"
+    return m
 
 
 @pytest.fixture()
 def engine(wm, pm):
     """TranscriptionEngine wired with mock managers."""
     return mt.TranscriptionEngine(wm, pm)
+
+
+@pytest.fixture()
+def fake_diar_worker(engine, monkeypatch):
+    """Bypass real process spawning: inject a fake process + plain queues so
+    _run_diarization's orchestration (poll / kill-on-cancel) can be tested
+    without starting a real OS process."""
+    proc = _FakeDiarProcess()
+    task_q = queue.Queue()
+    result_q = queue.Queue()
+    engine._diar_process = proc
+    engine._diar_task_q = task_q
+    engine._diar_result_q = result_q
+    monkeypatch.setattr(engine, "_ensure_diarization_worker", lambda: None)
+    return proc, task_q, result_q
 
 
 # ============================================================================
@@ -300,22 +354,28 @@ def test_DR_105_save_transcript_skips_blank_segments(engine, tmp_path):
 
 
 # ============================================================================
-# DR-106 to DR-109  _run_diarization()
+# DR-106 to DR-109  _diarization_worker_main() — runs inside the diarization
+# worker process; tested directly (in-process) with pyannote.audio/torch
+# mocked via sys.modules, per repo convention.
 # ============================================================================
 
 @pytest.mark.filesystem
-def test_DR_106_run_diarization_numpy_array_is_unsqueezed(engine, monkeypatch):
+def test_DR_106_run_diarization_numpy_array_is_unsqueezed(monkeypatch):
     """DR-106: If audio is a numpy.ndarray (float32, mono), it is converted to
     torch.Tensor shape [1, N] via torch.from_numpy(audio).unsqueeze(0); no
     file I/O occurs."""
     mono = np.ones(4096, dtype=np.float32)  # 1-D array
     mock_torch = _make_torch_mock(monkeypatch, cuda_available=False)
-    mock_result = MagicMock()
-    mock_result.exclusive_speaker_diarization = _make_annotation([])
-    engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
+    _make_pa_mock(monkeypatch, pipeline_result=_make_annotation([]))
 
-    engine._run_diarization(mono)
+    task_q = queue.Queue()
+    result_q = queue.Queue()
+    task_q.put((mono, "tok", False, 16))
+    task_q.put(None)
+    mt._diarization_worker_main(task_q, result_q, "cache_dir")
 
+    status, _ = result_q.get_nowait()
+    assert status == "ok"
     # from_numpy must have been called with the array directly
     mock_torch.from_numpy.assert_called_once_with(mono)
     # unsqueeze(0) applied to produce [1, N]
@@ -323,21 +383,24 @@ def test_DR_106_run_diarization_numpy_array_is_unsqueezed(engine, monkeypatch):
 
 
 @pytest.mark.filesystem
-def test_DR_107_run_diarization_path_transposes_multichannel(engine, tmp_path, monkeypatch):
+def test_DR_107_run_diarization_path_transposes_multichannel(tmp_path, monkeypatch):
     """DR-107 (Path, multi-channel): If audio is a Path and the WAV is stereo,
     it is transposed to [C, N] channel-first layout via .T."""
     stereo = np.ones((4096, 2), dtype=np.float32)  # (N, C) from soundfile
     monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(stereo, 16000)))
 
     mock_torch = _make_torch_mock(monkeypatch, cuda_available=False)
-    mock_result = MagicMock()
-    mock_result.exclusive_speaker_diarization = _make_annotation([])
-    engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
+    _make_pa_mock(monkeypatch, pipeline_result=_make_annotation([]))
 
     wav = tmp_path / "audio.wav"
     wav.touch()
-    engine._run_diarization(wav)
+    task_q = queue.Queue()
+    result_q = queue.Queue()
+    task_q.put((wav, "tok", False, 16))
+    task_q.put(None)
+    mt._diarization_worker_main(task_q, result_q, "cache_dir")
 
+    assert result_q.get_nowait()[0] == "ok"
     called_array = mock_torch.from_numpy.call_args[0][0]
     assert called_array.ndim == 2
     # transposed: first dim is channels (2), second is samples (4096)
@@ -346,63 +409,65 @@ def test_DR_107_run_diarization_path_transposes_multichannel(engine, tmp_path, m
 
 
 @pytest.mark.filesystem
-def test_DR_107b_run_diarization_path_reshapes_mono(engine, tmp_path, monkeypatch):
+def test_DR_107b_run_diarization_path_reshapes_mono(tmp_path, monkeypatch):
     """DR-107 (Path, mono): If audio is a Path and the WAV is mono, it is
     reshaped to [1, N] layout before being passed to pyannote."""
     mono = np.ones(4096, dtype=np.float32)  # 1-D
     monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
 
     mock_torch = _make_torch_mock(monkeypatch, cuda_available=False)
-    mock_result = MagicMock()
-    mock_result.exclusive_speaker_diarization = _make_annotation([])
-    engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
+    _make_pa_mock(monkeypatch, pipeline_result=_make_annotation([]))
 
     wav = tmp_path / "audio.wav"
     wav.touch()
-    engine._run_diarization(wav)
+    task_q = queue.Queue()
+    result_q = queue.Queue()
+    task_q.put((wav, "tok", False, 16))
+    task_q.put(None)
+    mt._diarization_worker_main(task_q, result_q, "cache_dir")
 
+    assert result_q.get_nowait()[0] == "ok"
     called_array = mock_torch.from_numpy.call_args[0][0]
     assert called_array.ndim == 2
     assert called_array.shape[0] == 1
 
 
 @pytest.mark.filesystem
-def test_DR_108_run_diarization_calls_on_status(engine, tmp_path, monkeypatch):
-    """DR-108: If on_status is provided, it is called before the pipeline runs."""
-    mono = np.ones(4096, dtype=np.float32)
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
-    _make_torch_mock(monkeypatch, cuda_available=False)
-    mock_result = MagicMock()
-    mock_result.exclusive_speaker_diarization = _make_annotation([])
-    engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
+def test_DR_108_run_diarization_calls_on_status(engine, fake_diar_worker):
+    """DR-108: If on_status is provided, it is called before diarization is
+    handed off to the worker process."""
+    proc, task_q, result_q = fake_diar_worker
+    result_q.put(("ok", _make_annotation([])))
 
-    wav = tmp_path / "audio.wav"
-    wav.touch()
     calls = []
-    engine._run_diarization(wav, on_status=calls.append)
+    engine._run_diarization(np.ones(4096, dtype=np.float32), on_status=calls.append)
 
     assert len(calls) >= 1
     assert any("diarization" in c.lower() for c in calls)
 
 
 @pytest.mark.filesystem
-def test_DR_109_run_diarization_moves_tensor_to_gpu_when_avail(engine, tmp_path, monkeypatch):
+def test_DR_109_run_diarization_moves_tensor_to_gpu_when_avail(tmp_path, monkeypatch):
     """DR-109: If a GPU is available, the audio tensor is moved to CUDA before
     the pipeline call."""
     mono = np.ones(4096, dtype=np.float32)
     monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
 
     mock_torch = _make_torch_mock(monkeypatch, cuda_available=True)
-    mock_result = MagicMock()
-    mock_result.exclusive_speaker_diarization = _make_annotation([])
-    engine.pyannote.get_pipeline.return_value = MagicMock(return_value=mock_result)
+    _make_pa_mock(monkeypatch, pipeline_result=_make_annotation([]))
 
     wav = tmp_path / "audio.wav"
     wav.touch()
-    engine._run_diarization(wav)
+    task_q = queue.Queue()
+    result_q = queue.Queue()
+    task_q.put((wav, "tok", True, 16))
+    task_q.put(None)
+    mt._diarization_worker_main(task_q, result_q, "cache_dir")
 
+    assert result_q.get_nowait()[0] == "ok"
     mock_torch.device.assert_called_with("cuda")
     mock_torch.from_numpy.return_value.to.assert_called_once()
+
 
 
 # ============================================================================
@@ -711,45 +776,74 @@ def test_DR_127_assign_speakers_new_block_on_speaker_change(engine):
 
 
 # ============================================================================
-# DR-214  _run_diarization() — daemon thread polling cancellation
+# DR-214  _run_diarization() — immediate kill on cancellation
 # ============================================================================
 
 @pytest.mark.filesystem
-def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, tmp_path, monkeypatch):
-    """DR-214: If cancel_event is set before the pipeline daemon thread
-    completes, _run_diarization() returns None without waiting for it to finish."""
-    import threading as _threading
+def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, fake_diar_worker):
+    """DR-214: If cancel_event is set, _run_diarization() kills the worker
+    process immediately and returns None without waiting for a result."""
+    proc, task_q, result_q = fake_diar_worker
+    cancel_event = threading.Event()
+    cancel_event.set()  # already cancelled — no result is ever queued
 
-    mono = np.ones(4096, dtype=np.float32)
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
-    _make_torch_mock(monkeypatch, cuda_available=False)
-
-    cancel_event = _threading.Event()
-
-    # Pipeline blocks indefinitely; cancel_event is set from the test thread.
-    pipeline_started = _threading.Event()
-
-    def slow_pipeline(inputs, batch_size=None):
-        pipeline_started.set()
-        # Block until the test is over (daemon thread, so it won't prevent exit)
-        _threading.Event().wait(timeout=30)
-        return MagicMock()
-
-    engine.pyannote.get_pipeline.return_value = slow_pipeline
-
-    wav = tmp_path / "audio.wav"
-    wav.touch()
-
-    # Set cancel_event only after the pipeline daemon thread has started.
-    def _set_cancel():
-        pipeline_started.wait(timeout=2)
-        cancel_event.set()
-
-    _threading.Thread(target=_set_cancel, daemon=True).start()
-
-    result = engine._run_diarization(wav, cancel_event=cancel_event)
+    result = engine._run_diarization(np.ones(4096, dtype=np.float32), cancel_event=cancel_event)
 
     assert result is None
+    assert proc.killed
+    assert engine._diar_process is None  # forces a fresh worker on the next call
+
+
+# ============================================================================
+# DR-254  _run_diarization() — worker restart after cancel
+# ============================================================================
+
+@pytest.mark.filesystem
+def test_DR_254_run_diarization_respawns_worker_after_cancel(engine, fake_diar_worker):
+    """DR-254: After a cancel path sets _diar_process = None, the next call to
+    _run_diarization() calls _ensure_diarization_worker() again so a fresh
+    worker is started; the second run completes normally and returns an
+    Annotation."""
+    proc, task_q, result_q = fake_diar_worker
+
+    # ── First call: cancel immediately ──
+    cancel_event = threading.Event()
+    cancel_event.set()
+    engine._run_diarization(np.ones(4096, dtype=np.float32), cancel_event=cancel_event)
+
+    assert engine._diar_process is None  # killed by first call
+
+    # ── Second call: fresh worker injected by the fixture side-effect reset ──
+    # Re-inject a fresh fake worker so _ensure_diarization_worker (patched to
+    # no-op) still finds a live process via the attributes we set directly.
+    fresh_proc = _FakeDiarProcess()
+    fresh_task_q = queue.Queue()
+    fresh_result_q = queue.Queue()
+    fresh_result_q.put(("ok", _make_annotation([])))
+    engine._diar_process = fresh_proc
+    engine._diar_task_q = fresh_task_q
+    engine._diar_result_q = fresh_result_q
+
+    result = engine._run_diarization(np.ones(4096, dtype=np.float32))
+
+    assert result is not None  # completed normally
+    assert not fresh_proc.killed
+
+
+# ============================================================================
+# DR-255  _run_diarization() — RuntimeError on unexpected worker death
+# ============================================================================
+
+@pytest.mark.filesystem
+def test_DR_255_run_diarization_raises_on_unexpected_worker_death(engine, fake_diar_worker):
+    """DR-255: If the worker process exits unexpectedly (not due to cancel),
+    _run_diarization() raises RuntimeError without waiting for a result."""
+    proc, task_q, result_q = fake_diar_worker
+    # Simulate unexpected death: process is not alive, no result queued, no cancel
+    proc._alive = False
+
+    with pytest.raises(RuntimeError, match="exited unexpectedly"):
+        engine._run_diarization(np.ones(4096, dtype=np.float32))
 
 
 # ============================================================================
@@ -774,40 +868,3 @@ def test_DR_244_process_forwards_numpy_array_to_transcribe(engine):
 
     assert len(received) == 1
     assert received[0] is audio
-
-
-def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, tmp_path, monkeypatch):
-    """DR-214: If cancel_event is set before the pipeline daemon thread
-    completes, _run_diarization() returns None without waiting for it to finish."""
-    import threading as _threading
-
-    mono = np.ones(4096, dtype=np.float32)
-    monkeypatch.setattr(mt.sf, "read", MagicMock(return_value=(mono, 16000)))
-    _make_torch_mock(monkeypatch, cuda_available=False)
-
-    cancel_event = _threading.Event()
-
-    # Pipeline blocks indefinitely; cancel_event is set from the test thread.
-    pipeline_started = _threading.Event()
-
-    def slow_pipeline(inputs, batch_size=None):
-        pipeline_started.set()
-        # Block until the test is over (daemon thread, so it won't prevent exit)
-        _threading.Event().wait(timeout=30)
-        return MagicMock()
-
-    engine.pyannote.get_pipeline.return_value = slow_pipeline
-
-    wav = tmp_path / "audio.wav"
-    wav.touch()
-
-    # Set cancel_event only after the pipeline daemon thread has started.
-    def _set_cancel():
-        pipeline_started.wait(timeout=2)
-        cancel_event.set()
-
-    _threading.Thread(target=_set_cancel, daemon=True).start()
-
-    result = engine._run_diarization(wav, cancel_event=cancel_event)
-
-    assert result is None

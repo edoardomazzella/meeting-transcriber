@@ -100,6 +100,7 @@ test_DR_209_apply_settings_sets_all_widgets                      DR-209    F-32 
 test_DR_210_close_event_stops_recording_if_active                DR-210    F-01,F-02        §3.2
 test_DR_211_close_event_skips_stop_if_not_recording              DR-211    F-01,F-02        §3.2
 test_DR_212_close_event_accepts_even_on_save_exception           DR-212    NF-05            §3.2
+test_DR_257_close_event_calls_engine_shutdown                    DR-257    NF-09            §3.2,§4.1
 test_DR_220_start_live_pipeline_noop_when_no_output_dir          DR-220    F-36             §3.6
 test_DR_221_start_live_pipeline_resets_segments_and_starts_thread   DR-221    F-36,F-37        §3.6
 test_DR_222_run_live_pipeline_waits_for_enough_audio             DR-222    F-36             §3.6
@@ -1407,10 +1408,12 @@ def test_DR_194_on_cancel_sets_flag_disables_button_updates_status(win):
     """DR-194: Single path — the cancellation flag is set, the Cancel button is
     disabled, and the status label is updated to indicate cancellation."""
     win.cancel_button.setEnabled(True)
+    win.engine.shutdown = MagicMock()
 
     win._on_cancel_clicked()
 
     assert win._cancel_event.is_set()
+    win.engine.shutdown.assert_called_once()
     assert not win.cancel_button.isEnabled()
     assert "cancel" in win.status_label.text().lower()
 
@@ -1762,6 +1765,24 @@ def test_DR_212_close_event_accepts_even_on_save_exception(win, monkeypatch):
     event = MagicMock()
     win.closeEvent(event)  # _save_settings will fail (bad path) but must not propagate
 
+    event.accept.assert_called_once()
+
+
+@pytest.mark.qt
+def test_DR_257_close_event_calls_engine_shutdown(win, monkeypatch):
+    """DR-257: closeEvent() calls engine.shutdown() to terminate the diarization
+    worker process and free GPU/CPU resources, regardless of recording state."""
+    monkeypatch.setattr(mt.MainWindow, "_save_settings",
+                        _original_save_settings)
+    monkeypatch.setattr(mt, "_SETTINGS_FILE", Path("/nonexistent/settings.json"))
+
+    win.recording = False
+    win.engine.shutdown = MagicMock()
+
+    event = MagicMock()
+    win.closeEvent(event)
+
+    win.engine.shutdown.assert_called_once()
     event.accept.assert_called_once()
 
 

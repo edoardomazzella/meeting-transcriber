@@ -4,6 +4,8 @@ __version__ = "1.0.0"
 
 import sys
 import threading
+import multiprocessing
+import queue
 import warnings
 import inspect
 from pathlib import Path
@@ -127,20 +129,24 @@ _KEYRING_SERVICE  = "MeetingTranscription"
 _KEYRING_USERNAME = "huggingface_token"
 
 # ── Single instance guard ─────────────────────────────────────────────────────
+# Skipped in diarization worker subprocesses (MEETING_TRANSCRIBER_WORKER=1):
+# on Windows, multiprocessing's "spawn" start method re-imports this module in
+# the child process, and the port is already held by the parent GUI process.
 import socket as _socket
-_instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-try:
-    _instance_lock.bind(("127.0.0.1", 47832))
-except OSError:
-    import ctypes
-    ctypes.windll.user32.MessageBoxW(
-        0,
-        "Meeting Transcriber is already running.",
-        "Meeting Transcriber",
-        0x30,  # MB_ICONWARNING
-    )
-    log.warning("Second instance blocked — app already running")
-    sys.exit(0)
+if not os.environ.get("MEETING_TRANSCRIBER_WORKER"):
+    _instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        _instance_lock.bind(("127.0.0.1", 47832))
+    except OSError:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Meeting Transcriber is already running.",
+            "Meeting Transcriber",
+            0x30,  # MB_ICONWARNING
+        )
+        log.warning("Second instance blocked — app already running")
+        sys.exit(0)
 
 if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
@@ -708,6 +714,61 @@ class _OffsetSegment:
         ]
 
 
+def _diarization_worker_main(task_queue, result_queue, cache_dir):
+    """Entry point for the persistent diarization worker process.
+
+    Runs in a separate OS process (spawned via `multiprocessing`) so that it
+    can be killed immediately and unconditionally on cancellation — a Python
+    thread cannot be forcibly stopped mid-computation, but a process can.
+    The pyannote pipeline is loaded once and reused across tasks; it is only
+    reloaded if the process is respawned (e.g. after being killed).
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
+        from pyannote.audio import Pipeline
+    import torch
+
+    pipeline = None
+    pipeline_on_cuda = None
+
+    while True:
+        task = task_queue.get()
+        if task is None:
+            return
+        audio, token, use_cuda, batch_size = task
+        try:
+            if pipeline is None or pipeline_on_cuda != use_cuda:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-community-1",
+                    token=token,
+                    cache_dir=cache_dir,
+                )
+                if use_cuda:
+                    pipeline.to(torch.device("cuda"))
+                pipeline_on_cuda = use_cuda
+
+            if isinstance(audio, np.ndarray):
+                waveform = torch.from_numpy(audio).unsqueeze(0)  # [1, N]
+                sr = SAMPLE_RATE
+            else:
+                arr, sr = sf.read(str(audio), dtype="float32")
+                if arr.ndim == 1:
+                    arr = arr[np.newaxis, :]   # mono -> [1, N]
+                else:
+                    arr = arr.T                # multi-channel -> [C, N]
+                waveform = torch.from_numpy(arr)
+            device = torch.device("cuda" if use_cuda else "cpu")
+            waveform = waveform.to(device)
+
+            with torch.no_grad():
+                result = pipeline(
+                    {"waveform": waveform, "sample_rate": sr}, batch_size=batch_size
+                )
+            result_queue.put(("ok", result.exclusive_speaker_diarization))
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+
 # ── TranscriptionEngine ───────────────────────────────────────────────────────
 
 class TranscriptionEngine:
@@ -716,6 +777,9 @@ class TranscriptionEngine:
     def __init__(self, whisper, pyannote):
         self.whisper = whisper
         self.pyannote = pyannote
+        self._diar_process = None
+        self._diar_task_q = None
+        self._diar_result_q = None
 
     def process(self, audio, output_dir, language, enable_diarization, on_status=None, cancel_event=None):
         """Transcribe and optionally diarize. audio may be a numpy array or a file Path."""
@@ -744,62 +808,95 @@ class TranscriptionEngine:
                     f.write(f"[{format_timestamp(segment.start)}] {segment.text.strip()}\n\n")
         return txt
 
+    def _ensure_diarization_worker(self):
+        """Start the persistent diarization worker process if it isn't running."""
+        if self._diar_process is not None and self._diar_process.is_alive():
+            return
+        ctx = multiprocessing.get_context("spawn")
+        task_q = ctx.Queue()
+        result_q = ctx.Queue()
+        cache_dir = str(self.pyannote.models_dir)
+
+        prev_flag = os.environ.get("MEETING_TRANSCRIBER_WORKER")
+        os.environ["MEETING_TRANSCRIBER_WORKER"] = "1"
+        try:
+            proc = ctx.Process(
+                target=_diarization_worker_main,
+                args=(task_q, result_q, cache_dir),
+                daemon=True,
+            )
+            proc.start()
+        finally:
+            if prev_flag is None:
+                os.environ.pop("MEETING_TRANSCRIBER_WORKER", None)
+            else:
+                os.environ["MEETING_TRANSCRIBER_WORKER"] = prev_flag
+
+        self._diar_process = proc
+        self._diar_task_q = task_q
+        self._diar_result_q = result_q
+
+    def shutdown(self):
+        """Terminate the diarization worker process, if running (app close)."""
+        if self._diar_process is not None and self._diar_process.is_alive():
+            self._diar_process.kill()
+        self._diar_process = None
+        self._diar_task_q = None
+        self._diar_result_q = None
+
     def _run_diarization(self, audio, on_status=None, cancel_event=None):
-        """Run speaker diarization.
+        """Run speaker diarization in a separate worker process.
 
         Accepts a numpy float32 array (post-recording) or a Path/str (WAV-file
         transcription). Returns the Annotation, or None if cancelled.
+
+        The pipeline call runs in a dedicated OS process (not a thread) so that
+        cancellation can kill it immediately: native inference code cannot be
+        interrupted from within Python, but the whole process can be killed by
+        the OS at any point.
         """
         import torch
+        use_cuda = torch.cuda.is_available()
         if isinstance(audio, np.ndarray):
-            # In-memory path: convert directly (DR-106)
             log.info("Diarization started (in-memory, %d samples)", len(audio))
-            waveform = torch.from_numpy(audio).unsqueeze(0)  # [1, N]
-            sr = SAMPLE_RATE
         else:
-            # File-path: load with soundfile (DR-107)
             log.info("Diarization started (wav=%s)", audio)
-            waveform, sr = sf.read(str(audio), dtype="float32")
-            if waveform.ndim == 1:
-                waveform = waveform[np.newaxis, :]   # mono -> [1, N]
-            else:
-                waveform = waveform.T                # multi-channel -> [C, N]
-            waveform = torch.from_numpy(waveform)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        waveform = waveform.to(device)
         if on_status:
             on_status("Running speaker diarization...")
 
-        _result_holder = [None]
-        _error_holder = [None]
-        _done = threading.Event()
+        token = self.pyannote.load_token()
+        self._ensure_diarization_worker()
+        self._diar_task_q.put((audio, token, use_cuda, PYANNOTE_BATCH))
 
-        def _run_pipeline():
-            try:
-                with torch.no_grad():
-                    _result_holder[0] = self.pyannote.get_pipeline()(
-                        {"waveform": waveform, "sample_rate": sr}, batch_size=PYANNOTE_BATCH
-                    )
-            except Exception as exc:
-                _error_holder[0] = exc
-            finally:
-                _done.set()
-
-        _t = threading.Thread(target=_run_pipeline, daemon=True)
-        _t.start()
-
-        while not _done.wait(timeout=0.1):
+        status = payload = None
+        while True:
             if cancel_event and cancel_event.is_set():
-                del waveform
-                log.info("Diarization cancelled — pipeline thread continues as daemon")
+                proc = self._diar_process
+                if proc is not None and proc.is_alive():
+                    proc.kill()
+                self._diar_process = None  # force a fresh worker next call
+                self._diar_task_q = None
+                self._diar_result_q = None
+                log.info("Diarization cancelled — worker process killed immediately")
                 return None
+            if self._diar_process is None or not self._diar_process.is_alive():
+                if cancel_event and cancel_event.is_set():
+                    return None
+                # Worker died without an explicit error — surface as a failure.
+                self._diar_process = None
+                self._diar_task_q = None
+                self._diar_result_q = None
+                raise RuntimeError("Diarization worker process exited unexpectedly")
+            try:
+                status, payload = self._diar_result_q.get(timeout=0.1)
+                break
+            except queue.Empty:
+                continue
 
-        del waveform
+        if status == "error":
+            raise payload
 
-        if _error_holder[0]:
-            raise _error_holder[0]
-
-        speaker_segments = _result_holder[0].exclusive_speaker_diarization
+        speaker_segments = payload
         speakers = {label for _, _, label in speaker_segments.itertracks(yield_label=True)}
         log.info("Diarization completed (%d speakers)", len(speakers))
         return speaker_segments
@@ -1713,6 +1810,9 @@ class MainWindow(QWidget):
 
     def _on_cancel_clicked(self):
         self._cancel_event.set()
+        # Force-release any warm diarization worker so GPU memory is reclaimed
+        # immediately even when cancellation happens outside diarization.
+        self.engine.shutdown()
         self.cancel_button.setEnabled(False)
         self.signals.status_changed.emit("Cancelling...")
 
@@ -1761,6 +1861,7 @@ class MainWindow(QWidget):
             if getattr(self, "recording", False):
                 self.recording = False
                 self.recorder.stop()
+            self.engine.shutdown()
         finally:
             event.accept()
 

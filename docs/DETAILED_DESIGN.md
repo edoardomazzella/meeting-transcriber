@@ -139,6 +139,7 @@ Enumerates available audio devices using `soundcard`.
 |---|---|
 | DR-015 | If audio device enumeration succeeds, two populated lists are returned — one of microphones and one of speakers. |
 | DR-016 | If enumeration raises any exception (e.g. the audio library is unavailable or no hardware is present), a warning is logged and two empty lists are returned. |
+| DR-256 | If the environment variable `MEETING_TRANSCRIBER_WORKER` is set to any non-empty value, the module can be imported in a subprocess without triggering the single-instance guard; no blocking dialog is shown and the import completes successfully even when the main application process is already running. |
 ---
 
 #### `_make_app_icon() -> QIcon`
@@ -737,22 +738,24 @@ Writes `transcript.txt` with lines of the form `[HH:MM:SS.mmm] text`.
 | DR-105 | Segments whose text content is non-empty are written as lines; segments with blank text are skipped. |
 ---
 
-#### `_run_diarization(audio: np.ndarray | Path, on_status: Callable | None = None) -> Annotation` *(private)*
+#### `_run_diarization(audio: np.ndarray | Path, on_status: Callable | None = None, cancel_event: threading.Event | None = None) -> Annotation | None` *(private)*
 
-Accepts a normalised `float32` numpy array or a WAV file path, converts to a pyannote-compatible waveform dict, runs the pyannote pipeline, and returns the `exclusive_speaker_diarization` annotation.
+Accepts a normalised `float32` numpy array or a WAV file path and hands it off to a persistent worker **process** (`_diarization_worker_main`, spawned via `multiprocessing`) which converts it to a pyannote-compatible waveform dict, runs the pyannote pipeline, and returns the `exclusive_speaker_diarization` annotation.
 
-**Returns**: `pyannote.core.Annotation`.  
-**Side effect**: logs start and completion (with speaker count) at INFO level; imports `torch` lazily; frees the waveform tensor with `del`.
+**Returns**: `pyannote.core.Annotation`, or `None` if cancelled.
+**Side effect**: logs start and completion (with speaker count) at INFO level; lazily spawns/reuses a diarization worker process (`_ensure_diarization_worker`).
 
 **Detailed requirements**:
 
 | ID | Requirement |
 |---|---|
-| DR-106 | If `audio` is a `numpy.ndarray` (float32, mono), it is converted to a 2-D `torch.Tensor` of shape `[1, N]` via `torch.from_numpy(audio).unsqueeze(0)` and wrapped in a `{"waveform": tensor, "sample_rate": SAMPLE_RATE}` dict; no file I/O occurs. |
-| DR-107 | If `audio` is a `Path`, it is read with `soundfile.read()`; a mono file is reshaped to `[1, N]`; a multi-channel file is transposed to `[C, N]` channel-first layout; the result is wrapped in a `{"waveform": tensor, "sample_rate": file_sr}` dict. |
-| DR-108 | If `on_status` is provided, it is called before the pipeline runs; if omitted, no callback is made. |
-| DR-109 | If a GPU is available, the audio data is moved to the GPU before the pipeline call; otherwise it remains on CPU. |
-| DR-214 | The blocking pipeline call runs on a daemon thread; the caller polls `cancel_event` every ≤100 ms via `threading.Event.wait(timeout=0.1)` and returns `None` immediately if the event is set, without waiting for the pipeline daemon to finish. |
+| DR-106 | If `audio` is a `numpy.ndarray` (float32, mono), the worker converts it to a 2-D `torch.Tensor` of shape `[1, N]` via `torch.from_numpy(audio).unsqueeze(0)` and wraps it in a `{"waveform": tensor, "sample_rate": SAMPLE_RATE}` dict; no file I/O occurs. |
+| DR-107 | If `audio` is a `Path`, the worker reads it with `soundfile.read()`; a mono file is reshaped to `[1, N]`; a multi-channel file is transposed to `[C, N]` channel-first layout; the result is wrapped in a `{"waveform": tensor, "sample_rate": file_sr}` dict. |
+| DR-108 | If `on_status` is provided, it is called before the task is handed off to the worker process; if omitted, no callback is made. |
+| DR-109 | If a GPU is available, the worker moves the audio data to the GPU before the pipeline call; otherwise it remains on CPU. |
+| DR-214 | The pipeline call runs in a dedicated worker process (not a thread), so it can be killed unconditionally: the caller polls `cancel_event` every ≤100 ms via `threading.Event.wait(timeout=0.1)` and returns `None` immediately if the event is set, without waiting for a result, instead of the computation continuing in the background. |
+| DR-254 | After a cancellation, a subsequent diarization request completes successfully and returns a valid result; the diarization infrastructure is transparently restored without any external intervention by the caller. |
+| DR-255 | If the diarization worker terminates abnormally while a result is being awaited and cancellation has not been requested, `_run_diarization()` raises a `RuntimeError` immediately; no partial result is returned. |
 ---
 
 #### `_save_diarized_transcript(segments: list, speaker_segments: Annotation, output_dir: Path) -> Path` *(private)*
@@ -1406,6 +1409,7 @@ Calls `_save_settings`, stops any active recording, then accepts the event.
 | DR-210 | If a recording is in progress when the window is closed, it is stopped before the window closes. |
 | DR-211 | If no recording is active, no stop operation is attempted. |
 | DR-212 | Regardless of whether saving settings or stopping the recording raises an exception, the window always closes. |
+| DR-257 | When the window closes, any active diarization computation is terminated and its GPU/CPU resources are released before the window is dismissed, regardless of whether a recording was in progress at the time of closure. |
 ---
 
 ## 9. Architecture Traceability
@@ -1718,6 +1722,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-007–DR-008 | _combo_set_data() | F-32 | §3.6, §4.4 |
 | DR-009–DR-014 | format_timestamp() | F-22, F-23 | §3.3 |
 | DR-015–DR-016 | _get_audio_devices() | F-04, F-05, NF-07, NF-08 | §3.2 |
+| DR-256 | Module-level single-instance guard (MEETING_TRANSCRIBER_WORKER bypass) | NF-09 | §4.3 |
 
 ---
 
@@ -1781,7 +1786,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-098–DR-102, DR-244 | process() | F-10, F-14, F-15, F-17, F-22, F-23 | §3.3, §3.5, §4.8 |
 | DR-103–DR-105 | _save_transcript() | F-22, F-25 | §3.3 |
 | DR-106–DR-109 | _run_diarization() | F-17, NF-03 | §3.3, §4.8 |
-| DR-214 | _run_diarization() — daemon thread polling | F-14, F-15 | §3.3, §4.1 |
+| DR-214, DR-254–DR-255 | _run_diarization() — worker-process kill + restart | F-14, F-15 | §3.3, §4.1 |
 | DR-110–DR-112 | _save_diarized_transcript() | F-23, F-25 | §3.3 |
 | DR-113–DR-114 | _unique_path() | F-25 | §3.3 |
 | DR-115–DR-118 | _find_best_speaker() | F-20 | §3.3 |
@@ -1866,4 +1871,4 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 |---|---|---|---|
 | DR-207–DR-208 | _save_settings() | F-32, NF-05 | §3.6, §4.4 |
 | DR-209 | _apply_settings() | F-32 | §3.6, §4.4 |
-| DR-210–DR-212 | closeEvent() | F-01, F-02, NF-05 | §3.2, §4.2 |
+| DR-210–DR-212, DR-257 | closeEvent() | F-01, F-02, NF-05 | §3.2, §4.1, §4.2 |

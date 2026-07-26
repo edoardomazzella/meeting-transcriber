@@ -436,7 +436,7 @@ All background threads communicate with the UI exclusively via Qt signals. No ba
 
 **Responsive cancellation** uses two sub-patterns (see CD §3.2 DR-213 and CD §6.2 DR-214):
 - *Producer/consumer (transcription)*: the segment generator runs on a daemon thread feeding a bounded queue with cancellation-safe, non-blocking enqueue semantics; the consumer polls with a 100 ms timeout so `cancel_event` is checked at that interval regardless of segment inference time, and producer termination cannot be stalled by a full queue after cancellation.
-- *Daemon-thread abandonment (diarization)*: the blocking pipeline call runs on a daemon thread; the caller polls a `threading.Event` every 100 ms and returns `None` immediately if cancelled, leaving the daemon to finish in the background.
+- *Worker-process kill (diarization)*: the blocking pyannote pipeline call runs in a dedicated worker **process** (spawned via `multiprocessing`, reused across calls); the caller polls a `threading.Event` every 100 ms and, if cancelled, kills the process immediately with `process.kill()` and returns `None` — the OS reclaims CPU/GPU resources at once, rather than letting the computation continue in the background. A fresh worker is spawned (and the pipeline reloaded) the next time diarization runs.
 
 **Live pipeline thread safety** (see CD §3.2 DR-213 and CD §5.2 DR-219):
 - *Transcription lock*: `WhisperManager._transcribe_lock` (`threading.Lock`) serialises all `transcribe()` calls. The live pipeline thread and the post-processing thread share the same `WhisperModel` instance; the lock guarantees they never call it concurrently.
