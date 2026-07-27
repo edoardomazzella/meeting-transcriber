@@ -138,10 +138,11 @@ if not os.environ.get("MEETING_TRANSCRIBER_WORKER"):
         import ctypes
 
         _ERROR_ALREADY_EXISTS = 183
-        _instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _instance_mutex = _kernel32.CreateMutexW(
             None, False, "Local\\MeetingTranscriberSingleInstance"
         )
-        if ctypes.windll.kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
             ctypes.windll.user32.MessageBoxW(
                 0,
                 "Meeting Transcriber is already running.",
@@ -857,6 +858,13 @@ class TranscriptionEngine:
         """Terminate the diarization worker process, if running (app close)."""
         if self._diar_process is not None and self._diar_process.is_alive():
             self._diar_process.kill()
+        for _q in (self._diar_task_q, self._diar_result_q):
+            if _q is not None:
+                try:
+                    _q.cancel_join_thread()  # prevent GC/atexit from blocking on feeder thread
+                    _q.close()
+                except Exception:
+                    pass
         self._diar_process = None
         self._diar_task_q = None
         self._diar_result_q = None
@@ -891,6 +899,13 @@ class TranscriptionEngine:
                 proc = self._diar_process
                 if proc is not None and proc.is_alive():
                     proc.kill()
+                for _q in (self._diar_task_q, self._diar_result_q):
+                    if _q is not None:
+                        try:
+                            _q.cancel_join_thread()
+                            _q.close()
+                        except Exception:
+                            pass
                 self._diar_process = None  # force a fresh worker next call
                 self._diar_task_q = None
                 self._diar_result_q = None
@@ -900,6 +915,13 @@ class TranscriptionEngine:
                 if cancel_event and cancel_event.is_set():
                     return None
                 # Worker died without an explicit error — surface as a failure.
+                for _q in (self._diar_task_q, self._diar_result_q):
+                    if _q is not None:
+                        try:
+                            _q.cancel_join_thread()
+                            _q.close()
+                        except Exception:
+                            pass
                 self._diar_process = None
                 self._diar_task_q = None
                 self._diar_result_q = None
@@ -1875,6 +1897,12 @@ class MainWindow(QWidget):
     def closeEvent(self, event):
         try:
             self._save_settings()
+            # Stop Qt timers so no callbacks fire after destruction
+            if hasattr(self, "timer"):        self.timer.stop()
+            if hasattr(self, "_level_timer"): self._level_timer.stop()
+            # Signal all background threads/pipeline to stop
+            if hasattr(self, "_cancel_event"):            self._cancel_event.set()
+            if hasattr(self, "_live_pipeline_stop_event"): self._live_pipeline_stop_event.set()
             if getattr(self, "recording", False):
                 self.recording = False
                 self.recorder.stop()

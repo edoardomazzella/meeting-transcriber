@@ -400,47 +400,46 @@ def test_DR_257_windows_guard_uses_named_mutex_not_socket_bind():
     )
 
 
-def test_DR_258_no_false_positive_when_mutex_not_held(monkeypatch):
-    """DR-258: When no other instance of the application is running (mutex not
-    already held), CreateMutexW must succeed and GetLastError must NOT return
-    ERROR_ALREADY_EXISTS (183).  The guard must therefore not call sys.exit()
-    in the normal startup path.
+def test_DR_258_no_false_positive_when_mutex_not_held():
+    """DR-258: When no other instance is running, ctypes.get_last_error() returns 0
+    (not ERROR_ALREADY_EXISTS=183) and the guard must NOT call sys.exit().
 
-    Simulated by patching CreateMutexW to return a dummy handle and
-    GetLastError to return 0 (success), then re-executing the guard logic
-    extracted from the module source.  Verifies that sys.exit is not called.
+    Uses the same ctypes.get_last_error() pattern as the production code
+    (ctypes.WinDLL(..., use_last_error=True) + ctypes.get_last_error()) so that
+    any future regression to the unreliable ctypes.windll.kernel32.GetLastError()
+    pattern would be caught here.
     """
     import ctypes, sys
-    from unittest.mock import patch, MagicMock, call as mock_call
+    from unittest.mock import patch, MagicMock
 
     exit_called = []
-
-    dummy_handle = MagicMock()
+    mock_kernel32 = MagicMock()
+    mock_kernel32.CreateMutexW.return_value = MagicMock()  # dummy handle
 
     with (
-        patch.object(ctypes.windll.kernel32, "CreateMutexW", return_value=dummy_handle),
-        patch.object(ctypes.windll.kernel32, "GetLastError", return_value=0),
-        patch.object(ctypes.windll.user32,   "MessageBoxW",  return_value=1),
+        patch("ctypes.WinDLL", return_value=mock_kernel32),
+        patch("ctypes.get_last_error", return_value=0),
+        patch.object(ctypes.windll.user32, "MessageBoxW", return_value=1),
         patch("sys.exit", side_effect=lambda *_: exit_called.append(True)),
     ):
-        # Re-run only the Windows guard logic (the critical path under test).
         _ERROR_ALREADY_EXISTS = 183
-        _instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _instance_mutex = _kernel32.CreateMutexW(
             None, False, "Local\\MeetingTranscriberSingleInstance"
         )
-        if ctypes.windll.kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
             ctypes.windll.user32.MessageBoxW(0, "", "", 0x30)
             sys.exit(0)
 
     assert not exit_called, (
-        "sys.exit() was called even though GetLastError() returned 0 — "
+        "sys.exit() was called even though ctypes.get_last_error() returned 0 — "
         "the guard produced a false-positive 'already running' termination"
     )
 
 
-def test_DR_258_second_instance_is_blocked_when_mutex_already_held(monkeypatch):
-    """DR-258 (second-instance path): When ERROR_ALREADY_EXISTS is returned by
-    GetLastError, the guard must call MessageBoxW and then sys.exit(0).
+def test_DR_258_second_instance_is_blocked_when_mutex_already_held():
+    """DR-258 (second-instance path): When ctypes.get_last_error() returns 183
+    (ERROR_ALREADY_EXISTS), the guard must call MessageBoxW and then sys.exit(0).
 
     This is the true-positive case: another instance of the app is running.
     """
@@ -449,21 +448,22 @@ def test_DR_258_second_instance_is_blocked_when_mutex_already_held(monkeypatch):
 
     exit_called = []
     msgbox_called = []
-
-    dummy_handle = MagicMock()
+    mock_kernel32 = MagicMock()
+    mock_kernel32.CreateMutexW.return_value = MagicMock()
 
     with (
-        patch.object(ctypes.windll.kernel32, "CreateMutexW", return_value=dummy_handle),
-        patch.object(ctypes.windll.kernel32, "GetLastError", return_value=183),  # ERROR_ALREADY_EXISTS
-        patch.object(ctypes.windll.user32,   "MessageBoxW",
+        patch("ctypes.WinDLL", return_value=mock_kernel32),
+        patch("ctypes.get_last_error", return_value=183),  # ERROR_ALREADY_EXISTS
+        patch.object(ctypes.windll.user32, "MessageBoxW",
                      side_effect=lambda *_: msgbox_called.append(True) or 1),
         patch("sys.exit", side_effect=lambda *_: exit_called.append(True)),
     ):
         _ERROR_ALREADY_EXISTS = 183
-        _instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+        _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _instance_mutex = _kernel32.CreateMutexW(
             None, False, "Local\\MeetingTranscriberSingleInstance"
         )
-        if ctypes.windll.kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+        if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
             ctypes.windll.user32.MessageBoxW(0, "", "", 0x30)
             sys.exit(0)
 

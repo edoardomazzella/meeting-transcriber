@@ -8,11 +8,15 @@ Why we patch before import
 --------------------------
 meeting_transcription.py runs several side-effects at module level:
 
-1. ``_instance_lock.bind(("127.0.0.1", 47832))``
-   The single-instance guard.  If the application is already running (or port
-   47832 is occupied by a previous test process), the bind raises OSError and
-   the module calls sys.exit(0), aborting the entire test session.
-   Fix: patch socket.socket.bind → no-op for the duration of the import.
+1. Single-instance guard (module-level, runs before any class is defined).
+   - Windows path: ``ctypes.WinDLL("kernel32", use_last_error=True).CreateMutexW(...)``
+     followed by ``ctypes.get_last_error()``.  If the real app (or a previous
+     test process) already holds the mutex, get_last_error() returns 183
+     (ERROR_ALREADY_EXISTS) and the module calls sys.exit(0).
+     Fix: patch ``ctypes.get_last_error`` → return 0 for the duration of the import.
+   - Non-Windows path: ``_instance_lock.bind(("127.0.0.1", 47832))`` raises OSError
+     if the port is occupied, also triggering sys.exit(0).
+     Fix: patch ``socket.socket.bind`` → no-op for the duration of the import.
 
 2. ``_cfg = _load_config()``
    Reads / creates config.json in the *real* project directory.  Acceptable at
@@ -36,19 +40,25 @@ tmp_settings_file function  — redirects mt._SETTINGS_FILE to tmp_path per test
 
 import socket as _socket_module
 import sys
+import ctypes as _ctypes_module
 from unittest.mock import patch as _mock_patch
 
 import pytest
 
 # ---------------------------------------------------------------------------
-# 1. Neutralise the single-instance TCP socket guard BEFORE the import
+# 1. Neutralise the single-instance guard BEFORE the import
+#    (both Windows mutex path and non-Windows socket path)
 # ---------------------------------------------------------------------------
-_bind_patcher = _mock_patch.object(_socket_module.socket, "bind", return_value=None)
+_bind_patcher       = _mock_patch.object(_socket_module.socket, "bind", return_value=None)
+_lasterr_patcher    = _mock_patch("ctypes.get_last_error", return_value=0)
+
 _bind_patcher.start()
+_lasterr_patcher.start()
 
-import meeting_transcription as mt  # noqa: E402 — must follow the patch above
+import meeting_transcription as mt  # noqa: E402 — must follow the patches above
 
-_bind_patcher.stop()  # module is fully loaded; patch no longer needed
+_bind_patcher.stop()
+_lasterr_patcher.stop()  # module is fully loaded; patches no longer needed
 
 
 # ---------------------------------------------------------------------------
