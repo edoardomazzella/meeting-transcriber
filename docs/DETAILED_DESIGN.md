@@ -140,6 +140,8 @@ Enumerates available audio devices using `soundcard`.
 | DR-015 | If audio device enumeration succeeds, two populated lists are returned — one of microphones and one of speakers. |
 | DR-016 | If enumeration raises any exception (e.g. the audio library is unavailable or no hardware is present), a warning is logged and two empty lists are returned. |
 | DR-256 | If the environment variable `MEETING_TRANSCRIBER_WORKER` is set to any non-empty value, the module can be imported in a subprocess without triggering the single-instance guard; no blocking dialog is shown and the import completes successfully even when the main application process is already running. |
+| DR-257 | On Windows (`os.name == "nt"`) the single-instance guard uses a named kernel mutex (`Local\MeetingTranscriberSingleInstance`) created via `CreateMutexW`; it must **not** use a TCP socket bind on a fixed port, because a port may be occupied by an unrelated process and cause a false-positive "already running" dialog. |
+| DR-258 | The single-instance guard must produce a false-positive-free detection: the "already running" dialog is shown if and only if another instance of this application is already running, never because an unrelated process happens to hold the same OS resource (port, mutex name, etc.). |
 ---
 
 #### `_make_app_icon() -> QIcon`
@@ -1424,7 +1426,7 @@ This section provides full, function-level traceability from every element of `A
 
 | Purpose / ARCH § | Function |
 |---|---|
-| Single-instance socket lock (§4.3) | Module-level `_socket.bind()` §1.3 |
+| Single-instance mutex lock (§4.3) | Module-level `CreateMutexW` (Windows) / `_socket.bind()` (non-Windows) §1.3 |
 | CUDA DLL path setup (§4.5, NF-03) | Module-level `os.add_dll_directory` §1.3 |
 | Configuration loading (§4.4) | `_load_config()` §1.3 |
 | Settings loading (§4.4) | `_load_settings()` §1.3 |
@@ -1552,7 +1554,7 @@ This section provides full, function-level traceability from every element of `A
 | §4.1 Chunk buffer lock | `AudioRecorder._chunks_lock` (DR-219 §5.2) — protects `_speaker_chunks`/`_mic_chunks` from concurrent reader+writer access |
 | §4.2 Logging — error capture | Module-level `log = logging.getLogger(__name__)` §1.3; `sys.excepthook` §1.3; `log.error/warning/info` calls in every class |
 | §4.2 Logging — no tokens in logs | `PyannoteManager.save_token()`, `load_token()`, `delete_token()` §4.2 — token strings never passed to `log` calls |
-| §4.3 Single Instance | Module-level socket lock §1.3 — executed before `MainWindow.__init__` |
+| §4.3 Single Instance | Module-level named mutex (Windows) / socket lock (non-Windows) §1.3 — executed before `MainWindow.__init__` |
 | §4.4 Settings Persistence | `MainWindow._save_settings()` §8.8; `MainWindow._apply_settings()` §8.8; `_combo_set_data()` §1.3 |
 | §4.5 Lazy imports — `faster_whisper` | `WhisperManager.load()` §3.2 |
 | §4.5 Lazy imports — `pyannote.audio` | `PyannoteManager._initialize_pipeline()` §4.2; `PyannoteManager.download_models()` §4.2 |
@@ -1569,7 +1571,7 @@ This section provides full, function-level traceability from every element of `A
 
 | Sequence step | Implementing Method |
 |---|---|
-| Check single instance (port lock) | Module-level socket bind §1.3 |
+| Check single instance (mutex / socket lock) | Module-level `CreateMutexW` (Windows) / socket bind (non-Windows) §1.3 |
 | Show GUI immediately | `MainWindow.__init__` §8.2 → `w.show()` |
 | Start background model-loading thread | `MainWindow.__init__` §8.2 |
 | `is_installed()?` — Whisper | `WhisperManager.is_installed()` §3.2 |
@@ -1722,7 +1724,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-007–DR-008 | _combo_set_data() | F-32 | §3.6, §4.4 |
 | DR-009–DR-014 | format_timestamp() | F-22, F-23 | §3.3 |
 | DR-015–DR-016 | _get_audio_devices() | F-04, F-05, NF-07, NF-08 | §3.2 |
-| DR-256 | Module-level single-instance guard (MEETING_TRANSCRIBER_WORKER bypass) | NF-09 | §4.3 |
+| DR-256–DR-258 | Module-level single-instance guard (MEETING_TRANSCRIBER_WORKER bypass; Windows mutex; false-positive-free detection) | NF-09 | §4.3 |
 
 ---
 

@@ -131,22 +131,39 @@ _KEYRING_USERNAME = "huggingface_token"
 # ── Single instance guard ─────────────────────────────────────────────────────
 # Skipped in diarization worker subprocesses (MEETING_TRANSCRIBER_WORKER=1):
 # on Windows, multiprocessing's "spawn" start method re-imports this module in
-# the child process, and the port is already held by the parent GUI process.
+# the child process, and the lock is already held by the parent GUI process.
 import socket as _socket
 if not os.environ.get("MEETING_TRANSCRIBER_WORKER"):
-    _instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
-    try:
-        _instance_lock.bind(("127.0.0.1", 47832))
-    except OSError:
+    if os.name == "nt":
         import ctypes
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            "Meeting Transcriber is already running.",
-            "Meeting Transcriber",
-            0x30,  # MB_ICONWARNING
+
+        _ERROR_ALREADY_EXISTS = 183
+        _instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+            None, False, "Local\\MeetingTranscriberSingleInstance"
         )
-        log.warning("Second instance blocked — app already running")
-        sys.exit(0)
+        if ctypes.windll.kernel32.GetLastError() == _ERROR_ALREADY_EXISTS:
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "Meeting Transcriber is already running.",
+                "Meeting Transcriber",
+                0x30,  # MB_ICONWARNING
+            )
+            log.warning("Second instance blocked — app already running")
+            sys.exit(0)
+    else:
+        _instance_lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            _instance_lock.bind(("127.0.0.1", 47832))
+        except OSError:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "Meeting Transcriber is already running.",
+                "Meeting Transcriber",
+                0x30,  # MB_ICONWARNING
+            )
+            log.warning("Second instance blocked — app already running")
+            sys.exit(0)
 
 if CUDA_BIN_DIR and os.path.isdir(CUDA_BIN_DIR):
     os.add_dll_directory(CUDA_BIN_DIR)
