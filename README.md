@@ -85,7 +85,8 @@ On first launch, `config.json` is created:
     "chunk_length": 30,
     "pyannote_batch_size": 16,
     "pipeline_chunk_seconds": 10,
-    "copilot_model": "auto"
+    "copilot_model": "auto",
+    "copilot_timeout_seconds": 60
 }
 ```
 
@@ -102,12 +103,13 @@ On first launch, `config.json` is created:
 | `pyannote_batch_size` | `16` | Segments diarized in parallel. Increase (e.g. `32`) if VRAM allows; decrease to reduce GPU heat |
 | `pipeline_chunk_seconds` | `10` | Size in seconds of each live-transcription chunk. Lower for faster updates, higher for better throughput |
 | `copilot_model` | `"auto"` | Copilot model used for meeting minutes. `auto` lets Copilot select an available model |
+| `copilot_timeout_seconds` | `60` | Maximum wait for the Copilot response before the request fails. Use `null` or `0` for no timeout |
 
 ## Meeting minutes with Copilot
 
 When **Create meeting minutes with Copilot** is enabled, the application sends the completed transcript to the GitHub Copilot service and saves the response as Markdown. Copilot uses the GitHub account already authenticated on the computer. On first use, follow any authentication instructions shown by the Copilot runtime.
 
-The generated document includes a summary, discussion points, decisions, and action items. Review it before distribution: AI-generated minutes can omit or misinterpret details. If Copilot is unavailable, the transcript is preserved and the completion dialog reports that the minutes could not be created.
+The generated document includes a summary, discussion points, decisions, and action items. Review it before distribution: AI-generated minutes can omit or misinterpret details. If Copilot is unavailable, the transcript is preserved and the completion dialog reports that the minutes could not be created. Pressing **Cancel** during Copilot generation aborts the active session and does not write a minutes file.
 
 ## Diarization (speaker identification)
 

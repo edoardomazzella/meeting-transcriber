@@ -6,6 +6,12 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+pytest-*.txt
+pytest-*.xml
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 venv/
 .venv/
 .env

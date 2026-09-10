@@ -1,4 +1,6 @@
+import asyncio
 from types import SimpleNamespace
+import threading
 
 import pytest
 
@@ -10,10 +12,16 @@ class FakeSession:
         self.content = content
         self.prompt = None
         self.disconnected = False
+        self.aborted = False
+        self.timeout = "not-passed"
 
-    async def send_and_wait(self, prompt):
+    async def send_and_wait(self, prompt, **options):
         self.prompt = prompt
+        self.timeout = options.get("timeout", "not-passed")
         return SimpleNamespace(data=SimpleNamespace(content=self.content))
+
+    async def abort(self):
+        self.aborted = True
 
     async def disconnect(self):
         self.disconnected = True
@@ -57,6 +65,21 @@ def test_generate_writes_copilot_response_and_closes_resources(tmp_path):
     assert client.started and client.stopped and session.disconnected
 
 
+def test_generate_without_timeout_disables_sdk_timeout(tmp_path):
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text("A valid transcript", encoding="utf-8")
+    session = FakeSession()
+    client = FakeClient(session)
+    generator = mt.MeetingMinutesGenerator(
+        timeout_seconds=None, client_factory=lambda: client
+    )
+
+    result = generator.generate(transcript_path)
+
+    assert result.exists()
+    assert session.timeout is None
+
+
 def test_generate_rejects_empty_transcript_before_starting_client(tmp_path):
     transcript_path = tmp_path / "transcript.txt"
     transcript_path.write_text("  \n", encoding="utf-8")
@@ -87,3 +110,57 @@ def test_generate_does_not_write_file_for_empty_copilot_response(tmp_path):
 
     assert not (tmp_path / "meeting_minutes.md").exists()
     assert client.stopped and session.disconnected
+
+
+def test_generate_aborts_copilot_when_cancelled(tmp_path):
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text("A valid transcript", encoding="utf-8")
+    cancel_event = threading.Event()
+
+    class BlockingSession(FakeSession):
+        async def send_and_wait(self, prompt, **options):
+            self.prompt = prompt
+            while True:
+                await asyncio.sleep(1)
+
+    session = BlockingSession()
+    client = FakeClient(session)
+    generator = mt.MeetingMinutesGenerator(client_factory=lambda: client)
+    timer = threading.Timer(0.05, cancel_event.set)
+    timer.start()
+    try:
+        with pytest.raises(mt.MeetingMinutesCancelled):
+            generator.generate(transcript_path, cancel_event=cancel_event)
+    finally:
+        timer.cancel()
+
+    assert session.aborted
+    assert session.disconnected
+    assert client.stopped
+    assert not (tmp_path / "meeting_minutes.md").exists()
+
+
+def test_generate_can_be_cancelled_while_client_starts(tmp_path):
+    transcript_path = tmp_path / "transcript.txt"
+    transcript_path.write_text("A valid transcript", encoding="utf-8")
+    cancel_event = threading.Event()
+
+    class StartingClient(FakeClient):
+        async def start(self):
+            while True:
+                await asyncio.sleep(1)
+
+    session = FakeSession()
+    client = StartingClient(session)
+    generator = mt.MeetingMinutesGenerator(client_factory=lambda: client)
+    timer = threading.Timer(0.05, cancel_event.set)
+    timer.start()
+    try:
+        with pytest.raises(mt.MeetingMinutesCancelled):
+            generator.generate(transcript_path, cancel_event=cancel_event)
+    finally:
+        timer.cancel()
+
+    assert client.stopped
+    assert not session.aborted
+    assert not (tmp_path / "meeting_minutes.md").exists()

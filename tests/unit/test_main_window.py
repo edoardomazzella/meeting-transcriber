@@ -813,7 +813,9 @@ def test_process_recording_generates_minutes_before_finished(win, tmp_path, monk
 
     win._process_recording(None, True, False, False, True)
 
-    win.minutes_generator.generate.assert_called_once_with(fake_transcript)
+    win.minutes_generator.generate.assert_called_once_with(
+        fake_transcript, cancel_event=win._cancel_event
+    )
     assert win._last_minutes_file == str(fake_minutes)
     assert finished == [str(fake_transcript)]
 
@@ -838,6 +840,33 @@ def test_minutes_failure_preserves_successful_transcript(win, tmp_path, monkeypa
     assert finished == [str(fake_transcript)]
     assert errors == []
     assert win._minutes_warning == "Copilot unavailable"
+
+
+@pytest.mark.qt
+def test_cancelling_minutes_emits_cancelled_not_finished(win, tmp_path, monkeypatch):
+    """Cancelling Copilot preserves the transcript and ends as cancelled."""
+    import numpy as np
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    win._recording_output_dir = tmp_path
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, dtype=np.float32))
+    fake_transcript = tmp_path / "transcript.txt"
+    win.engine.process = MagicMock(return_value=fake_transcript)
+
+    def cancel_minutes(path, cancel_event=None):
+        cancel_event.set()
+        raise mt.MeetingMinutesCancelled()
+
+    win.minutes_generator.generate = cancel_minutes
+    finished = []
+    cancelled = []
+    win.signals.finished.connect(lambda folder, path: finished.append(path))
+    win.signals.cancelled.connect(cancelled.append)
+
+    win._process_recording(None, True, False, False, True)
+
+    assert finished == []
+    assert cancelled == [str(tmp_path)]
+    assert win._last_minutes_file is None
 
 
 @pytest.mark.qt

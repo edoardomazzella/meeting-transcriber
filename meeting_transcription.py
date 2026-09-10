@@ -47,6 +47,7 @@ _CONFIG_DEFAULTS = {
     "pyannote_batch_size": 16,
     "pipeline_chunk_seconds": 10,
     "copilot_model":       "auto",
+    "copilot_timeout_seconds": 60,
 }
 
 def _load_config():
@@ -73,6 +74,12 @@ CHUNK_LENGTH      = int(_cfg["chunk_length"])
 PYANNOTE_BATCH    = int(_cfg["pyannote_batch_size"])
 PIPELINE_CHUNK_SECONDS = max(3, int(_cfg.get("pipeline_chunk_seconds", 10)))
 COPILOT_MODEL = str(_cfg.get("copilot_model", "auto"))
+_copilot_timeout = _cfg.get("copilot_timeout_seconds", 60)
+COPILOT_TIMEOUT_SECONDS = (
+    None
+    if _copilot_timeout is None or int(_copilot_timeout) <= 0
+    else int(_copilot_timeout)
+)
 
 _SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 _SETTINGS_DEFAULTS = {
@@ -801,27 +808,37 @@ def _diarization_worker_main(task_queue, result_queue, cache_dir):
 
 # ── MeetingMinutesGenerator ──────────────────────────────────────────────────
 
+class MeetingMinutesCancelled(Exception):
+    """Raised when meeting-minutes generation is cancelled by the user."""
+
+
 class MeetingMinutesGenerator:
     """Generate Markdown meeting minutes from a transcript using Copilot."""
 
-    def __init__(self, model=COPILOT_MODEL, client_factory=None):
+    def __init__(self, model=COPILOT_MODEL, timeout_seconds=COPILOT_TIMEOUT_SECONDS,
+                 client_factory=None):
         self.model = model
+        self.timeout_seconds = timeout_seconds
         self._client_factory = client_factory
 
-    def generate(self, transcript_path, output_dir=None):
+    def generate(self, transcript_path, output_dir=None, cancel_event=None):
         transcript_path = Path(transcript_path)
         transcript = transcript_path.read_text(encoding="utf-8").strip()
         if not transcript:
             raise ValueError("Cannot generate meeting minutes from an empty transcript")
+        if cancel_event and cancel_event.is_set():
+            raise MeetingMinutesCancelled("Meeting minutes generation cancelled")
 
-        minutes = asyncio.run(self._request_minutes(transcript))
+        minutes = asyncio.run(self._request_minutes(transcript, cancel_event))
+        if cancel_event and cancel_event.is_set():
+            raise MeetingMinutesCancelled("Meeting minutes generation cancelled")
         destination = self._unique_path(
             Path(output_dir or transcript_path.parent) / "meeting_minutes.md"
         )
         destination.write_text(minutes.rstrip() + "\n", encoding="utf-8")
         return destination
 
-    async def _request_minutes(self, transcript):
+    async def _request_minutes(self, transcript, cancel_event=None):
         if self._client_factory is None:
             try:
                 from copilot import CopilotClient
@@ -833,19 +850,77 @@ class MeetingMinutesGenerator:
         else:
             client = self._client_factory()
 
-        await client.start()
+        session_holder = {"session": None}
+        request_task = asyncio.create_task(
+            self._run_copilot_request(client, transcript, session_holder)
+        )
+        cancel_task = None
+        if cancel_event is not None:
+            cancel_task = asyncio.create_task(self._wait_for_cancel(cancel_event))
+
+        tasks = (request_task,) if cancel_task is None else (request_task, cancel_task)
+        done, _ = await asyncio.wait(
+            tasks,
+            timeout=(
+                None if self.timeout_seconds is None
+                else float(self.timeout_seconds)
+            ),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_task is not None and cancel_task in done:
+            await self._abort_session(session_holder["session"])
+            request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            raise MeetingMinutesCancelled("Meeting minutes generation cancelled")
+        if request_task not in done:
+            await self._abort_session(session_holder["session"])
+            request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+            raise RuntimeError(
+                f"Copilot request timed out after {self.timeout_seconds} seconds"
+            )
+        if cancel_task is not None:
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
+        return await request_task
+
+    async def _run_copilot_request(self, client, transcript, session_holder):
+        session = None
         try:
+            await client.start()
             session = await client.create_session(model=self.model)
-            try:
-                response = await session.send_and_wait(self._build_prompt(transcript))
-                content = getattr(getattr(response, "data", None), "content", None)
-                if not content or not content.strip():
-                    raise RuntimeError("Copilot returned an empty response")
-                return content.strip()
-            finally:
-                await session.disconnect()
+            session_holder["session"] = session
+            response = await session.send_and_wait(
+                self._build_prompt(transcript),
+                timeout=(
+                    None if self.timeout_seconds is None
+                    else float(self.timeout_seconds)
+                ),
+            )
+            content = getattr(getattr(response, "data", None), "content", None)
+            if not content or not content.strip():
+                raise RuntimeError("Copilot returned an empty response")
+            return content.strip()
         finally:
-            await client.stop()
+            try:
+                if session is not None:
+                    await session.disconnect()
+            finally:
+                session_holder["session"] = None
+                await client.stop()
+
+    @staticmethod
+    async def _abort_session(session):
+        if session is not None:
+            try:
+                await session.abort()
+            except Exception:
+                log.warning("Could not abort Copilot session cleanly", exc_info=True)
+
+    @staticmethod
+    async def _wait_for_cancel(cancel_event):
+        while not cancel_event.is_set():
+            await asyncio.sleep(0.1)
 
     @staticmethod
     def _build_prompt(transcript):
@@ -1840,7 +1915,10 @@ class MainWindow(QWidget):
                 self.signals.cancelled.emit(str(wav_path.parent) if result_file else "")
             else:
                 self._generate_minutes_if_requested(result_file, enable_minutes)
-                self.signals.finished.emit(str(wav_path.parent), str(result_file))
+                if self._cancel_event.is_set():
+                    self.signals.cancelled.emit(str(wav_path.parent) if result_file else "")
+                else:
+                    self.signals.finished.emit(str(wav_path.parent), str(result_file))
         except Exception as e:
             log.error("WAV transcription failed: %s", e, exc_info=True)
             self.signals.error.emit(str(e))
@@ -1895,7 +1973,10 @@ class MainWindow(QWidget):
                 self.signals.cancelled.emit(str(d) if result_file else "")
             else:
                 self._generate_minutes_if_requested(result_file, enable_minutes)
-                self.signals.finished.emit(str(d), str(result_file))
+                if self._cancel_event.is_set():
+                    self.signals.cancelled.emit(str(d) if result_file else "")
+                else:
+                    self.signals.finished.emit(str(d), str(result_file))
             self._recording_output_dir = None
         except Exception as e:
             log.error("Recording processing failed: %s", e, exc_info=True)
@@ -1909,8 +1990,12 @@ class MainWindow(QWidget):
             return
         self.signals.status_changed.emit("Creating meeting minutes with Copilot...")
         try:
-            minutes_path = self.minutes_generator.generate(transcript_path)
+            minutes_path = self.minutes_generator.generate(
+                transcript_path, cancel_event=self._cancel_event
+            )
             self._last_minutes_file = str(minutes_path)
+        except MeetingMinutesCancelled:
+            log.info("Meeting minutes generation cancelled")
         except Exception as e:
             self._minutes_warning = str(e)
             log.error("Meeting minutes generation failed: %s", e, exc_info=True)
