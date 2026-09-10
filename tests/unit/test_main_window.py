@@ -100,14 +100,14 @@ test_DR_209_apply_settings_sets_all_widgets                      DR-209    F-32 
 test_DR_210_close_event_stops_recording_if_active                DR-210    F-01,F-02        §3.2
 test_DR_211_close_event_skips_stop_if_not_recording              DR-211    F-01,F-02        §3.2
 test_DR_212_close_event_accepts_even_on_save_exception           DR-212    NF-05            §3.2
-test_DR_257_close_event_calls_engine_shutdown                    DR-257    NF-09            §3.2,§4.1
+test_DR_259_close_event_calls_engine_shutdown                    DR-259    NF-09            §3.2,§4.1
 test_DR_220_start_live_pipeline_noop_when_no_output_dir          DR-220    F-36             §3.6
 test_DR_221_start_live_pipeline_resets_segments_and_starts_thread   DR-221    F-36,F-37        §3.6
 test_DR_222_run_live_pipeline_waits_for_enough_audio             DR-222    F-36             §3.6
 test_DR_223_run_live_pipeline_calls_whisper_with_chunk_wav       DR-223    F-36             §3.6
 test_DR_224_run_live_pipeline_accumulates_segments_in_memory         DR-224    F-37             §3.6
 test_DR_225_run_live_pipeline_updates_processed_samples          DR-225    F-36             §3.6
-test_DR_226_run_live_pipeline_deletes_temp_wav_on_exit           DR-226    F-36             §3.6
+test_DR_226_run_live_pipeline_no_temp_files_on_exit              DR-226    F-36             §3.6
 test_DR_227_stop_live_pipeline_joins_thread                      DR-227    F-38             §3.6
 test_DR_228_stop_live_pipeline_logs_warning_on_timeout           DR-228    F-38             §3.6
 test_DR_229_start_recording_creates_output_folder                DR-229    F-39             §3.6
@@ -115,8 +115,9 @@ test_F36_start_recording_starts_live_pipeline_when_transcribe_on    —       F-
 test_DR_230_stop_recording_calls_stop_live_pipeline              DR-230    F-38             §3.6
 test_DR_231_process_recording_reuses_recording_output_dir        DR-231    F-10,F-21,F-39   §3.3,§3.6
 test_DR_232_process_recording_calls_process_with_live_segments    DR-232    F-37             §3.6
-test_DR_234_process_with_live_falls_back_on_wav_read_error        DR-234    F-37             §3.6
-test_DR_235_process_with_live_transcribes_tail_only               DR-235    F-37             §3.6
+test_DR_233_process_recording_calls_engine_process_no_live_segs  DR-233    F-37             §3.6
+test_DR_234_process_with_live_uses_audio_shape_for_total_samples DR-234    F-37             §3.6
+test_DR_235_process_with_live_transcribes_tail_numpy_slice        DR-235    F-37             §3.6
 test_DR_237_process_with_live_returns_none_when_no_speech         DR-237    F-37             §3.6
 test_DR_238_process_with_live_no_diarization_returns_transcript   DR-238    F-37             §3.6
 test_DR_239_process_with_live_diarizes_full_wav                   DR-239    F-37             §3.6
@@ -1769,8 +1770,8 @@ def test_DR_212_close_event_accepts_even_on_save_exception(win, monkeypatch):
 
 
 @pytest.mark.qt
-def test_DR_257_close_event_calls_engine_shutdown(win, monkeypatch):
-    """DR-257: closeEvent() calls engine.shutdown() to terminate the diarization
+def test_DR_259_close_event_calls_engine_shutdown(win, monkeypatch):
+    """DR-259: closeEvent() calls engine.shutdown() to terminate the diarization
     worker process and free GPU/CPU resources, regardless of recording state."""
     monkeypatch.setattr(mt.MainWindow, "_save_settings",
                         _original_save_settings)
@@ -2187,6 +2188,32 @@ def test_DR_232_process_recording_calls_process_with_live_segments(win, tmp_path
     assert len(called_with) == 1
     assert isinstance(called_with[0], np.ndarray)
     win.engine.process.assert_not_called()
+
+
+@pytest.mark.qt
+def test_DR_233_process_recording_calls_engine_process_no_live_segs(win, tmp_path, monkeypatch):
+    """DR-233: If no live segments are available, the full audio numpy array is
+    passed directly to engine.process() and _process_with_live_segments() is
+    never called."""
+    import numpy as np
+
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    fake_audio = np.zeros(1024, dtype=np.float32)
+    win.recorder.get_mixed_audio = MagicMock(return_value=fake_audio)
+    win._live_transcribed_segments = []  # no live segments
+
+    fake_txt = tmp_path / "transcript.txt"
+    fake_txt.write_text("", encoding="utf-8")
+    win.engine.process = MagicMock(return_value=fake_txt)
+    win._process_with_live_segments = MagicMock()  # must not be called
+
+    finished = []
+    win.signals.finished.connect(lambda f, t: finished.append(t))
+
+    win._process_recording(None, True, False, False)
+
+    win.engine.process.assert_called_once()
+    win._process_with_live_segments.assert_not_called()
 
 
 @pytest.mark.qt

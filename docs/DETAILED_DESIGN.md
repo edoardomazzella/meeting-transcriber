@@ -25,15 +25,28 @@
 | `_KEYRING_USERNAME` | `"huggingface_token"` | Username key used for OS credential store |
 | `_KEYRING_AVAILABLE` | `bool` | `True` if the `keyring` package was successfully imported |
 | `PIPELINE_CHUNK_SECONDS` | `int` | Duration in seconds of each live transcription chunk; minimum 3 (from `config.json`) |
+| `MODEL_SIZE` | `str` | Whisper model size, e.g. `"medium"` (from `config.json`) |
+| `BEAM_SIZE` | `int` | Whisper beam size used in `transcribe()` (from `config.json`) |
+| `VAD` | `bool` | Whether Whisper VAD filter is enabled (from `config.json`) |
+| `NUM_WORKERS` | `int` | Number of Whisper worker threads (from `config.json`) |
+| `CPU_THREADS` | `int` | CPU threads for Whisper on CPU device (from `config.json`) |
+| `COMPUTE_TYPE_GPU` | `str` | Whisper compute type on GPU, e.g. `"int8_float16"` (from `config.json`) |
+| `CHUNK_LENGTH` | `int` | Audio chunk length in seconds for Whisper inference (from `config.json`) |
+| `PYANNOTE_BATCH` | `int` | Batch size for pyannote pipeline inference (from `config.json`) |
 
 ### 1.2 Configuration defaults
 
 ```python
 _CONFIG_DEFAULTS = {
-    "cuda_bin_dir": r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
-    "model_size":   "medium",
-    "beam_size":    5,
-    "vad":          True,
+    "cuda_bin_dir":        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin",
+    "model_size":          "medium",
+    "beam_size":           5,
+    "vad":                 True,
+    "num_workers":         4,
+    "cpu_threads":         4,
+    "compute_type_gpu":    "int8_float16",
+    "chunk_length":        30,
+    "pyannote_batch_size": 16,
     "pipeline_chunk_seconds": 10,
 }
 
@@ -679,6 +692,34 @@ Used by `MainWindow._process_with_live_segments()` to create a unified segment l
 
 ---
 
+## 5d. Module-Level Function: `_diarization_worker_main`
+
+> **Architecture mapping (ARCH)**: §3.3 (diarization worker process step); §3.5; §4.1 (worker-process kill pattern). Spawned by `TranscriptionEngine._ensure_diarization_worker()`.
+
+```python
+def _diarization_worker_main(task_queue, result_queue, cache_dir)
+```
+
+Entry point for the persistent diarization worker OS process. Runs in a **separate OS process** (spawned via `multiprocessing.get_context("spawn")`) so it can be killed unconditionally and immediately on cancellation — unlike a thread, an OS process cannot be blocked by the GIL or by native C++ inference code.
+
+The pyannote pipeline is loaded once and reused across consecutive tasks; it is only reloaded when the process is respawned or when the CUDA/CPU preference changes.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `task_queue` | `multiprocessing.Queue` | Receives `(audio, token, use_cuda, batch_size)` tuples, or `None` as a shutdown sentinel |
+| `result_queue` | `multiprocessing.Queue` | Returns `("ok", annotation)` on success or `("error", exception)` on failure |
+| `cache_dir` | `str` | Path to the pyannote model cache directory |
+
+**Behaviour per task**:
+1. Load (or reuse) the pyannote pipeline from `cache_dir`; move to GPU if `use_cuda` is `True`.
+2. Convert `audio` to a `{"waveform": torch.Tensor [1×N], "sample_rate": int}` dict — from numpy array via `torch.from_numpy().unsqueeze(0)`, or from file path via `soundfile.read()`.
+3. Call `pipeline(waveform_dict, batch_size=batch_size)` inside `torch.no_grad()`.
+4. Put `("ok", result.exclusive_speaker_diarization)` onto `result_queue` on success, or `("error", exc)` on any exception.
+
+The function blocks indefinitely on `task_queue.get()` between tasks; receiving `None` causes a clean return (graceful shutdown).
+
+---
+
 ## 6. Class: `TranscriptionEngine`
 
 > **Architecture mapping (ARCH)**: §2.2 `TranscriptionEngine` (Orchestration Layer); §2.3 dependency-injection receiver from `MainWindow`; orchestrates §3.3 Transcription & Diarization Pipeline and §3.5 WAV File Transcription.
@@ -691,7 +732,7 @@ Used by `MainWindow._process_with_live_segments()` to create a unified segment l
 def __init__(self, whisper: WhisperManager, pyannote: PyannoteManager)
 ```
 
-Receives both AI managers by dependency injection. No model loading occurs here.
+Receives both AI managers by dependency injection. No model loading occurs here. Initialises `_diar_process`, `_diar_task_q`, and `_diar_result_q` to `None`; these are populated lazily by `_ensure_diarization_worker()` on the first diarization call and reset to `None` by `shutdown()`.
 
 ### 6.2 Methods
 
@@ -758,6 +799,19 @@ Accepts a normalised `float32` numpy array or a WAV file path and hands it off t
 | DR-214 | The pipeline call runs in a dedicated worker process (not a thread), so it can be killed unconditionally: the caller polls `cancel_event` every ≤100 ms via `threading.Event.wait(timeout=0.1)` and returns `None` immediately if the event is set, without waiting for a result, instead of the computation continuing in the background. |
 | DR-254 | After a cancellation, a subsequent diarization request completes successfully and returns a valid result; the diarization infrastructure is transparently restored without any external intervention by the caller. |
 | DR-255 | If the diarization worker terminates abnormally while a result is being awaited and cancellation has not been requested, `_run_diarization()` raises a `RuntimeError` immediately; no partial result is returned. |
+---
+
+#### `shutdown() -> None`
+
+Terminates the diarization worker process if it is running, closes and releases the interprocess queues, and resets all worker-related attributes to `None`. Called from `_on_cancel_clicked()` (immediately on user cancel) and `closeEvent()` (on application close). A new worker process is spawned transparently by `_ensure_diarization_worker()` the next time `_run_diarization()` is called.
+
+**Side effects**: kills the worker OS process immediately with `process.kill()`; calls `cancel_join_thread()` and `close()` on both queues to prevent GC/atexit hangs; resets `_diar_process`, `_diar_task_q`, `_diar_result_q` to `None`.
+
+**Detailed requirements**:
+
+| ID | Requirement |
+|---|---|
+| DR-259 | When `shutdown()` is called and a worker process is alive, it is killed immediately with `process.kill()`; both interprocess queues (`_diar_task_q`, `_diar_result_q`) have `cancel_join_thread()` and `close()` called to prevent GC/atexit hangs; all three attributes are reset to `None`. If no process is alive, the method is a no-op. |
 ---
 
 #### `_save_diarized_transcript(segments: list, speaker_segments: Annotation, output_dir: Path) -> Path` *(private)*
@@ -1277,7 +1331,7 @@ Called every 80 ms; reads `recorder.get_levels()` and updates progress bars.
 
 | ID | Requirement |
 |---|---|
-| DR-194 | single path — the cancellation flag is set, the Cancel button is disabled, and the status label is updated. |
+| DR-194 | The cancellation flag (`_cancel_event`) is set, `engine.shutdown()` is called to kill any active diarization worker process immediately (reclaiming GPU/CPU resources), the Cancel button is disabled, and the status label is updated. |
 
 ---
 
@@ -1411,7 +1465,7 @@ Calls `_save_settings`, stops any active recording, then accepts the event.
 | DR-210 | If a recording is in progress when the window is closed, it is stopped before the window closes. |
 | DR-211 | If no recording is active, no stop operation is attempted. |
 | DR-212 | Regardless of whether saving settings or stopping the recording raises an exception, the window always closes. |
-| DR-257 | When the window closes, any active diarization computation is terminated and its GPU/CPU resources are released before the window is dismissed, regardless of whether a recording was in progress at the time of closure. |
+| DR-259 | When the window closes, any active diarization computation is terminated and its GPU/CPU resources are released before the window is dismissed, regardless of whether a recording was in progress at the time of closure. |
 ---
 
 ## 9. Architecture Traceability
@@ -1781,6 +1835,14 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 
 ---
 
+### 10.4c `_diarization_worker_main`
+
+| DR range | Implementing Method | SRS IDs | Architecture Ref |
+|---|---|---|---|
+| DR-106–DR-109 | _diarization_worker_main — audio→waveform dict conversion + pipeline call | F-17, NF-03 | §3.3, §3.5, §4.8 |
+
+---
+
 ### 10.5 TranscriptionEngine
 
 | DR range | Implementing Method | SRS IDs | Architecture Ref |
@@ -1793,6 +1855,7 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 | DR-113–DR-114 | _unique_path() | F-25 | §3.3 |
 | DR-115–DR-118 | _find_best_speaker() | F-20 | §3.3 |
 | DR-119–DR-127 | _assign_speakers_to_words() | F-17, F-20 | §3.3 |
+| DR-194 (partial), DR-259 | shutdown() — kill worker process on cancel / app close | F-14, F-17 | §3.3, §4.1 |
 
 ---
 
@@ -1873,4 +1936,4 @@ The **SRS IDs** column references REQUIREMENTS.md. The **Architecture Ref** colu
 |---|---|---|---|
 | DR-207–DR-208 | _save_settings() | F-32, NF-05 | §3.6, §4.4 |
 | DR-209 | _apply_settings() | F-32 | §3.6, §4.4 |
-| DR-210–DR-212, DR-257 | closeEvent() | F-01, F-02, NF-05 | §3.2, §4.1, §4.2 |
+| DR-210–DR-212, DR-259 | closeEvent() | F-01, F-02, NF-05 | §3.2, §4.1, §4.2 |

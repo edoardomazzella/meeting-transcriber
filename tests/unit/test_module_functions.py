@@ -373,17 +373,19 @@ def test_DR_257_windows_guard_uses_named_mutex_not_socket_bind():
             and test.comparators[0].value == "nt"
         ):
             nt_branch_found = True
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    func = child.func
-                    name = (
-                        func.attr if isinstance(func, ast.Attribute) else
-                        func.id   if isinstance(func, ast.Name)      else None
-                    )
-                    if name == "CreateMutexW":
-                        has_create_mutex = True
-                    if name == "bind":
-                        has_socket_bind = True
+            # Walk only the if-body (Windows path), NOT node.orelse (non-Windows)
+            for body_node in node.body:
+                for child in ast.walk(body_node):
+                    if isinstance(child, ast.Call):
+                        func = child.func
+                        name = (
+                            func.attr if isinstance(func, ast.Attribute) else
+                            func.id   if isinstance(func, ast.Name)      else None
+                        )
+                        if name == "CreateMutexW":
+                            has_create_mutex = True
+                        if name == "bind":
+                            has_socket_bind = True
 
     assert nt_branch_found, (
         "No 'if os.name == \"nt\"' branch found in the single-instance guard — "

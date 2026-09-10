@@ -55,7 +55,6 @@ classDiagram
 
     class DiarizationEngine {
         <<AI Layer>>
-        +load_pipeline()
         +get_pipeline()
         +download_models()
         +save_token() / load_token()
@@ -79,7 +78,7 @@ classDiagram
     MainWindow ..> PyannoteSetupDialog : creates
 
     TranscriptionEngine --> ASREngine : uses
-    TranscriptionEngine --> DiarizationEngine : uses
+    TranscriptionEngine --> DiarizationEngine : uses (load_token)
 ```
 
 ### 2.2 Component Responsibilities
@@ -93,7 +92,7 @@ The **Component Design §** column references the corresponding section in `DETA
 | **AudioRecorder** | Audio | Parallel mic + speaker capture on dedicated threads; audio mixing and normalisation; `get_mixed_audio()` returns a normalised numpy float32 array for direct in-memory AI inference; `save_wav()` writes to disk only when WAV saving is enabled (F-40); thread-safe incremental audio snapshot (`get_mixed_since`) | CD §5 |
 | **ASREngine** | AI | Whisper model lifecycle (download, load, transcribe); GPU→CPU fallback | CD §3 (`WhisperManager`) |
 | **DiarizationEngine** | AI | pyannote pipeline lifecycle; HuggingFace token management; speaker segmentation | CD §4 (`PyannoteManager`) |
-| **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; accepts a numpy float32 audio array (post-recording path) or a file path (WAV-file transcription path, F-16); passes audio directly to ASR with no intermediate disk write; builds a pyannote-compatible `{"waveform": tensor, "sample_rate": int}` dict from the in-memory array for diarization; speaker-to-word assignment; transcript file generation | CD §6 |
+| **TranscriptionEngine** | Orchestration | Coordinates ASR + diarization; accepts a numpy float32 audio array (post-recording path) or a file path (WAV-file transcription path, F-16); passes audio directly to ASR with no intermediate disk write; dispatches audio or path to the diarization worker process via a queue (`_diar_task_q`); the worker process builds the `{"waveform": tensor, "sample_rate": int}` dict and calls the pyannote pipeline; receives speaker segments from the worker result queue (`_diar_result_q`); speaker-to-word assignment; transcript file generation | CD §6 |
 | **PyannoteSetupDialog** | UI | One-shot dialog for HuggingFace token entry and model download | CD §7 |
 
 > **Note on naming**: `ASREngine` and `DiarizationEngine` are the logical names used at architecture level. Their concrete implementations are `WhisperManager` and `PyannoteManager` respectively.
@@ -144,7 +143,7 @@ sequenceDiagram
         BG->>Dia: download_models()
     end
 
-    BG->>Dia: load_pipeline()
+    BG->>Dia: get_pipeline() — validates model cache, initializes pipeline in main process
     BG-->>App: pyannote_ready(True/False) signal
     BG-->>App: initial_load_complete signal
     App->>User: Status "Ready", enable Start button
@@ -199,7 +198,7 @@ sequenceDiagram
     participant Rec as AudioRecorder
     participant TE as TranscriptionEngine
     participant ASR as ASR Engine
-    participant Dia as Diarization Engine
+    participant WP as Diarization Worker Process
 
     Note over GUI,BG: Thread spawned by _stop_recording() — see §3.2
     BG->>BG: Create timestamped output folder (recordings/YYYYMMDD_HHMMSS/)
@@ -216,10 +215,10 @@ sequenceDiagram
         ASR-->>TE: segments[] (may be partial if cancelled)
 
         alt Diarization enabled and not cancelled
-            TE->>TE: build waveform dict {waveform: tensor, sample_rate}
-            TE->>Dia: get_pipeline()(waveform_dict) — no disk I/O, runs in daemon thread
-            Note right of Dia: cancel_event polled every ≤100 ms
-            Dia-->>TE: speaker_segments
+            TE->>WP: enqueue (audio, token, use_cuda, batch_size) via _diar_task_q
+            Note right of WP: builds {waveform: tensor, sample_rate} dict, calls pyannote pipeline
+            WP-->>TE: ("ok", speaker_segments) via _diar_result_q
+            Note right of TE: if cancel_event set → process.kill() immediately; new worker spawned next call
             TE->>TE: assign_speakers_to_words(segments, speaker_segments)
             TE-->>BG: transcript_diarized.txt path
         else Diarization disabled or cancelled before/during diarization
@@ -238,7 +237,7 @@ sequenceDiagram
         User->>GUI: Click "Cancel"
         GUI->>BG: Set cancel_event
         Note right of BG: Transcription — consumer polls queue every ≤100 ms; producer queue writes are cancellation-safe and cannot block indefinitely (CD §3.2 DR-213)
-        Note right of BG: Diarization — daemon thread polled every ≤100 ms (CD §6.2 DR-214)
+        Note right of BG: Diarization — cancel_event → process.kill() immediately; worker process killed and new one spawned next call (CD §6.2 DR-214)
         ASR-->>TE: partial segments[] (within ≤100 ms of cancel)
         TE-->>BG: partial transcript.txt
         BG-->>GUI: cancelled(folder) signal
@@ -295,7 +294,7 @@ sequenceDiagram
     participant BG as Processing Thread
     participant TE as TranscriptionEngine
     participant ASR as ASR Engine
-    participant Dia as Diarization Engine
+    participant WP as Diarization Worker Process
 
     User->>GUI: Click "Transcribe WAV file…"
     GUI->>User: Open-file dialog
@@ -306,8 +305,10 @@ sequenceDiagram
     ASR-->>TE: segments[]
 
     alt Diarization enabled
-        TE->>Dia: get_pipeline()(wav_path) — file path accepted by pyannote
-        Dia-->>TE: speaker_segments
+        TE->>WP: enqueue (wav_path, token, use_cuda, batch_size) via _diar_task_q
+        Note right of WP: reads WAV file, builds waveform dict, calls pyannote pipeline
+        WP-->>TE: ("ok", speaker_segments) via _diar_result_q
+        TE->>TE: assign_speakers_to_words(segments, speaker_segments)
         TE-->>BG: transcript_diarized.txt
     else Diarization disabled
         TE-->>BG: transcript.txt
@@ -354,10 +355,11 @@ sequenceDiagram
     GUI->>LP: join(timeout=10 s)
     LP-->>GUI: thread exits
 
-    Note over GUI: Post-processing fast path
-    GUI->>GUI: _process_with_live_segments()
-    GUI->>Rec: get_mixed_audio(from=_live_processed_samples) — tail slice only
-    GUI->>ASR: transcribe(tail_audio) — numpy array, only audio after _live_processed_samples
+    Note over GUI: Post-processing fast path (_process_recording → _process_with_live_segments)
+    GUI->>Rec: get_mixed_audio() — full session audio (mix + normalise in memory)
+    Rec-->>GUI: audio (numpy float32, full session)
+    GUI->>GUI: _process_with_live_segments(audio) — slices tail_audio = audio[_live_processed_samples:]
+    GUI->>ASR: transcribe(tail_audio) — only audio after last live chunk
     GUI->>GUI: Merge live_segments + tail_segments → _OffsetSegment list
     GUI->>GUI: engine._save_transcript() — writes transcript.txt as normal
 ```
@@ -378,7 +380,7 @@ sequenceDiagram
 
     Note over App: Executed before MainWindow.__init__
     App->>FS: _load_config() — reads config.json, creates with defaults if absent
-    FS-->>App: model_size, beam_size, cuda_bin_dir, vad, ... (F-33)
+    FS-->>App: model_size, beam_size, vad, cuda_bin_dir, num_workers, cpu_threads, compute_type_gpu, chunk_length, pyannote_batch_size, pipeline_chunk_seconds (F-33)
     App->>FS: _load_settings() — reads settings.json, returns defaults if absent
     FS-->>App: transcribe, diarization, mic_enabled, language, devices, ...
 
@@ -457,8 +459,8 @@ To satisfy NF-01 (GUI visible within 2 seconds), all heavyweight libraries are i
 | Library | Imported inside | Component Design § |
 |---|---|---|
 | `faster_whisper.WhisperModel` | `WhisperManager.load()` | CD §3.2 |
-| `pyannote.audio.Pipeline` | `PyannoteManager._initialize_pipeline()`, `download_models()` | CD §4.2 |
-| `torch` | `PyannoteManager._initialize_pipeline()`, `TranscriptionEngine._run_diarization()` | CD §4.2, CD §6.2 |
+| `pyannote.audio.Pipeline` | `PyannoteManager._initialize_pipeline()`, `download_models()`, `_diarization_worker_main()` | CD §4.2, CD §5d |
+| `torch` | `PyannoteManager._initialize_pipeline()`, `TranscriptionEngine._run_diarization()`, `_diarization_worker_main()` | CD §4.2, CD §5d, CD §6.2 |
 | `soundcard` | `AudioRecorder._record_speaker()`, `_record_microphone()` | CD §5.2 |
 
 The GUI window is rendered and shown before any model loading begins. The background model-loading thread is started after the window is visible.
@@ -542,7 +544,7 @@ To eliminate unnecessary disk I/O and make WAV saving fully optional (F-40/F-41)
 
 | Execution path | Mixed audio source | To Whisper | To pyannote |
 |---|---|---|---|
-| Post-recording (§3.3) | `AudioRecorder.get_mixed_audio()` → numpy array | numpy array directly | `{"waveform": tensor, "sample_rate"}` built in `TranscriptionEngine` |
+| Post-recording (§3.3) | `AudioRecorder.get_mixed_audio()` → numpy array | numpy array directly | `{"waveform": tensor, "sample_rate"}` built in `_diarization_worker_main` (worker process) |
 | Live pipeline chunks (§3.6) | `AudioRecorder.get_mixed_since()` → numpy slice | numpy slice directly | — (pyannote runs only in post-processing) |
 | WAV-file transcription (§3.5, F-16) | User-selected file on disk | file path | file path |
 

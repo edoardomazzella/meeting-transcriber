@@ -1,7 +1,7 @@
 ﻿"""
 tests/test_transcription_engine.py
 ===================================
-Unit tests for TranscriptionEngine — DR-098 to DR-127, DR-214, DR-254–DR-255.
+Unit tests for TranscriptionEngine — DR-098 to DR-127, DR-214, DR-244, DR-254–DR-255, DR-259.
 
 All external dependencies are mocked:
   WhisperManager  → MagicMock injected via constructor
@@ -47,6 +47,7 @@ test_DR_127_assign_speakers_new_block_on_speaker_change      DR-127       F-17,F
 test_DR_214_run_diarization_returns_none_when_cancel_set     DR-214       F-14,F-15      §3.3,§4.1
 test_DR_254_run_diarization_respawns_worker_after_cancel     DR-254       F-14,F-15      §3.3,§4.1
 test_DR_255_run_diarization_raises_on_unexpected_worker_death DR-255      F-14,F-15      §3.3,§4.1
+test_DR_259_shutdown_kills_process_and_resets_attrs          DR-259       F-17           §3.3,§4.1
 
 CI safety
 ---------
@@ -868,3 +869,35 @@ def test_DR_244_process_forwards_numpy_array_to_transcribe(engine):
 
     assert len(received) == 1
     assert received[0] is audio
+
+
+# ============================================================================
+# DR-259  shutdown()
+# ============================================================================
+
+def test_DR_259_shutdown_kills_process_and_resets_attrs(engine):
+    """DR-259: When shutdown() is called and a worker process is alive it is
+    killed immediately, both queues are closed, and all three attributes are
+    reset to None. When no process is running the call is a no-op."""
+    # --- path 1: worker alive → killed + queues closed + attrs reset ---
+    proc = _FakeDiarProcess()
+    task_q = MagicMock()
+    result_q = MagicMock()
+    engine._diar_process = proc
+    engine._diar_task_q = task_q
+    engine._diar_result_q = result_q
+
+    engine.shutdown()
+
+    assert proc.killed
+    task_q.cancel_join_thread.assert_called_once()
+    task_q.close.assert_called_once()
+    result_q.cancel_join_thread.assert_called_once()
+    result_q.close.assert_called_once()
+    assert engine._diar_process is None
+    assert engine._diar_task_q is None
+    assert engine._diar_result_q is None
+
+    # --- path 2: no worker → no-op (must not raise) ---
+    engine.shutdown()
+    assert engine._diar_process is None
