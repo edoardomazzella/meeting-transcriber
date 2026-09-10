@@ -9,3 +9,4 @@ soundcard
 soundfile
 numpy
 keyring
+github-copilot-sdk

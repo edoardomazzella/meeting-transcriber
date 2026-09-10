@@ -3,6 +3,7 @@
 __version__ = "1.0.0"
 
 import sys
+import asyncio
 import threading
 import multiprocessing
 import queue
@@ -45,6 +46,7 @@ _CONFIG_DEFAULTS = {
     "chunk_length":        30,
     "pyannote_batch_size": 16,
     "pipeline_chunk_seconds": 10,
+    "copilot_model":       "auto",
 }
 
 def _load_config():
@@ -70,11 +72,13 @@ COMPUTE_TYPE_GPU  = _cfg["compute_type_gpu"]
 CHUNK_LENGTH      = int(_cfg["chunk_length"])
 PYANNOTE_BATCH    = int(_cfg["pyannote_batch_size"])
 PIPELINE_CHUNK_SECONDS = max(3, int(_cfg.get("pipeline_chunk_seconds", 10)))
+COPILOT_MODEL = str(_cfg.get("copilot_model", "auto"))
 
 _SETTINGS_FILE = SCRIPT_DIR / "settings.json"
 _SETTINGS_DEFAULTS = {
     "transcribe":      True,
     "diarization":     False,
+    "meeting_minutes": False,
     "mic_enabled":     True,
     "speaker_enabled": True,
     "language":        None,
@@ -787,6 +791,80 @@ def _diarization_worker_main(task_queue, result_queue, cache_dir):
             result_queue.put(("error", exc))
 
 
+# ── MeetingMinutesGenerator ──────────────────────────────────────────────────
+
+class MeetingMinutesGenerator:
+    """Generate Markdown meeting minutes from a transcript using Copilot."""
+
+    def __init__(self, model=COPILOT_MODEL, client_factory=None):
+        self.model = model
+        self._client_factory = client_factory
+
+    def generate(self, transcript_path, output_dir=None):
+        transcript_path = Path(transcript_path)
+        transcript = transcript_path.read_text(encoding="utf-8").strip()
+        if not transcript:
+            raise ValueError("Cannot generate meeting minutes from an empty transcript")
+
+        minutes = asyncio.run(self._request_minutes(transcript))
+        destination = self._unique_path(
+            Path(output_dir or transcript_path.parent) / "meeting_minutes.md"
+        )
+        destination.write_text(minutes.rstrip() + "\n", encoding="utf-8")
+        return destination
+
+    async def _request_minutes(self, transcript):
+        if self._client_factory is None:
+            try:
+                from copilot import CopilotClient
+            except ImportError as exc:
+                raise RuntimeError(
+                    "GitHub Copilot SDK is not installed. Run install.bat again."
+                ) from exc
+            client = CopilotClient()
+        else:
+            client = self._client_factory()
+
+        await client.start()
+        try:
+            session = await client.create_session(model=self.model)
+            try:
+                response = await session.send_and_wait(self._build_prompt(transcript))
+                content = getattr(getattr(response, "data", None), "content", None)
+                if not content or not content.strip():
+                    raise RuntimeError("Copilot returned an empty response")
+                return content.strip()
+            finally:
+                await session.disconnect()
+        finally:
+            await client.stop()
+
+    @staticmethod
+    def _build_prompt(transcript):
+        return (
+            "Create professional meeting minutes in Markdown from the transcript below. "
+            "Write in the main language used in the transcript. Include: title, date if "
+            "explicitly available, participants if identifiable, concise summary, discussion "
+            "points, decisions, and an action-items table with owner and due date. Clearly mark "
+            "unknown owners or dates as 'Not specified'. Do not invent facts, decisions, names, "
+            "or deadlines. Return only the Markdown document.\n\n"
+            "<transcript>\n"
+            f"{transcript}\n"
+            "</transcript>"
+        )
+
+    @staticmethod
+    def _unique_path(path):
+        if not path.exists():
+            return path
+        index = 2
+        while True:
+            candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+            index += 1
+
+
 # ── TranscriptionEngine ───────────────────────────────────────────────────────
 
 class TranscriptionEngine:
@@ -1154,6 +1232,7 @@ class MainWindow(QWidget):
         self.pyannote = PyannoteManager(MODEL_DIR)
         self.recorder = AudioRecorder()
         self.engine = TranscriptionEngine(self.whisper, self.pyannote)
+        self.minutes_generator = MeetingMinutesGenerator()
 
         # ── 3. UI-state flags ─────────────────────────────────────────────────
         self.recording = False
@@ -1176,6 +1255,8 @@ class MainWindow(QWidget):
         self._recording_output_dir = None
         self._live_transcribed_segments = []   # list of (base_seconds, Segment)
         self._live_processed_samples = 0
+        self._last_minutes_file = None
+        self._minutes_warning = None
 
         # ── 5. Window + widgets ───────────────────────────────────────────────
         self.setWindowTitle(f"Meeting Transcriber v{__version__}")
@@ -1224,6 +1305,8 @@ class MainWindow(QWidget):
         self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
         self.diarization_checkbox = QCheckBox("Enable speaker diarization")
         self.diarization_checkbox.setEnabled(False)
+        self.minutes_checkbox = QCheckBox("Create MoM")
+        self.minutes_checkbox.setEnabled(False)
         self.save_wav_checkbox = QCheckBox("Save audio (WAV)")
         self.save_wav_checkbox.setEnabled(False)
         self.save_wav_checkbox.toggled.connect(self._on_wav_save_toggled)
@@ -1324,6 +1407,7 @@ class MainWindow(QWidget):
         left_col = QVBoxLayout()
         left_col.addWidget(self.transcribe_checkbox)
         left_col.addWidget(self.diarization_checkbox)
+        left_col.addWidget(self.minutes_checkbox)
         left_col.addWidget(self.save_wav_checkbox)
         right_col = QVBoxLayout()
         right_col.setSpacing(3)
@@ -1435,6 +1519,9 @@ class MainWindow(QWidget):
         self.progress_bar.setVisible(False)
         if self.whisper_ready:
             self.transcribe_checkbox.setChecked(self._pending_settings["transcribe"])
+            self.minutes_checkbox.setChecked(
+                self._pending_settings.get("meeting_minutes", False)
+            )
         if self.whisper_ready and self.pyannote_ready:
             self.diarization_checkbox.setChecked(self._pending_settings["diarization"])
         self._update_controls()
@@ -1450,6 +1537,7 @@ class MainWindow(QWidget):
         self._update_controls()
 
     def _update_controls(self):
+        sources_unlocked = not self.recording and not self._processing
         if not self.whisper_ready:
             self.transcribe_checkbox.setChecked(False)
         self.transcribe_checkbox.setEnabled(self.whisper_ready)
@@ -1458,6 +1546,10 @@ class MainWindow(QWidget):
         if not can_diarize:
             self.diarization_checkbox.setChecked(False)
         self.diarization_checkbox.setEnabled(can_diarize)
+        can_create_minutes = self.whisper_ready and self.transcribe_checkbox.isChecked()
+        if not can_create_minutes:
+            self.minutes_checkbox.setChecked(False)
+        self.minutes_checkbox.setEnabled(can_create_minutes and sources_unlocked)
         whisper_installable = not self.whisper_ready
         self.install_whisper_button.setVisible(whisper_installable)
         self.install_whisper_button.setEnabled(
@@ -1481,7 +1573,6 @@ class MainWindow(QWidget):
             and not self.recording
             and not self._processing
         )
-        sources_unlocked = not self.recording and not self._processing
         self.mic_checkbox.setEnabled(sources_unlocked)
         self.speaker_checkbox.setEnabled(sources_unlocked)
         self.mic_combo.setEnabled(sources_unlocked and self.mic_checkbox.isChecked())
@@ -1599,6 +1690,7 @@ class MainWindow(QWidget):
         self.language_combo.setEnabled(False)
         self.transcribe_checkbox.setEnabled(False)
         self.diarization_checkbox.setEnabled(False)
+        self.minutes_checkbox.setEnabled(False)
         self.mic_checkbox.setEnabled(False)
         self.speaker_checkbox.setEnabled(False)
         self.mic_combo.setEnabled(False)
@@ -1703,10 +1795,11 @@ class MainWindow(QWidget):
         language = self.language_combo.currentData()
         enable_transcription = self.transcribe_checkbox.isChecked()
         enable_diarization = self.diarization_checkbox.isChecked()
+        enable_minutes = self.minutes_checkbox.isChecked()
         save_wav_enabled = self.save_wav_checkbox.isChecked()
         threading.Thread(
             target=self._process_recording,
-            args=(language, enable_transcription, enable_diarization, save_wav_enabled),
+            args=(language, enable_transcription, enable_diarization, save_wav_enabled, enable_minutes),
             daemon=True,
         ).start()
     def _on_transcribe_wav_clicked(self):
@@ -1726,13 +1819,14 @@ class MainWindow(QWidget):
         self.signals.status_changed.emit("Preparing...")
         language = self.language_combo.currentData()
         enable_diarization = self.diarization_checkbox.isChecked()
+        enable_minutes = self.minutes_checkbox.isChecked()
         threading.Thread(
             target=self._transcribe_wav_file,
-            args=(wav_path, language, enable_diarization),
+            args=(wav_path, language, enable_diarization, enable_minutes),
             daemon=True,
         ).start()
 
-    def _transcribe_wav_file(self, wav_path, language, enable_diarization):
+    def _transcribe_wav_file(self, wav_path, language, enable_diarization, enable_minutes=False):
         try:
             result_file = self.engine.process(
                 wav_path, wav_path.parent, language, enable_diarization,
@@ -1742,13 +1836,15 @@ class MainWindow(QWidget):
             if self._cancel_event.is_set():
                 self.signals.cancelled.emit(str(wav_path.parent) if result_file else "")
             else:
+                self._generate_minutes_if_requested(result_file, enable_minutes)
                 self.signals.finished.emit(str(wav_path.parent), str(result_file))
         except Exception as e:
             log.error("WAV transcription failed: %s", e, exc_info=True)
             self.signals.error.emit(str(e))
     # ── Processing ────────────────────────────────────────────────────────────
 
-    def _process_recording(self, language, enable_transcription, enable_diarization, save_wav_enabled=False):
+    def _process_recording(self, language, enable_transcription, enable_diarization,
+                           save_wav_enabled=False, enable_minutes=False):
         try:
             d = self._recording_output_dir
             if d is None:
@@ -1772,6 +1868,7 @@ class MainWindow(QWidget):
 
             if not enable_transcription:
                 # WAV saving must be enabled (F-42 guarantee)
+                self._generate_minutes_if_requested(None, False)
                 self.signals.status_changed.emit("Completed")
                 self.signals.finished.emit(str(d), str(wav_path) if wav_path else "")
                 return
@@ -1794,12 +1891,26 @@ class MainWindow(QWidget):
             if self._cancel_event.is_set():
                 self.signals.cancelled.emit(str(d) if result_file else "")
             else:
+                self._generate_minutes_if_requested(result_file, enable_minutes)
                 self.signals.finished.emit(str(d), str(result_file))
             self._recording_output_dir = None
         except Exception as e:
             log.error("Recording processing failed: %s", e, exc_info=True)
             self.signals.error.emit(str(e))
             self._recording_output_dir = None
+
+    def _generate_minutes_if_requested(self, transcript_path, enabled):
+        self._last_minutes_file = None
+        self._minutes_warning = None
+        if not enabled or not transcript_path:
+            return
+        self.signals.status_changed.emit("Creating meeting minutes with Copilot...")
+        try:
+            minutes_path = self.minutes_generator.generate(transcript_path)
+            self._last_minutes_file = str(minutes_path)
+        except Exception as e:
+            self._minutes_warning = str(e)
+            log.error("Meeting minutes generation failed: %s", e, exc_info=True)
 
     def _process_with_live_segments(self, audio, output_dir, language,
                                      enable_diarization, live_pairs):
@@ -1876,7 +1987,12 @@ class MainWindow(QWidget):
         self._update_controls()
         msg = QMessageBox(self)
         msg.setWindowTitle("Completed")
-        msg.setText(f"Folder:\n{folder}\n\nTranscript:\n{file}")
+        details = f"Folder:\n{folder}\n\nTranscript:\n{file}"
+        if self._last_minutes_file:
+            details += f"\n\nMeeting minutes:\n{self._last_minutes_file}"
+        elif self._minutes_warning:
+            details += f"\n\nMeeting minutes were not created:\n{self._minutes_warning}"
+        msg.setText(details)
         msg.setIcon(QMessageBox.Icon.Information)
         open_btn = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
         msg.addButton(QMessageBox.StandardButton.Ok)
@@ -1914,6 +2030,7 @@ class MainWindow(QWidget):
         s = {
             "transcribe":      self.transcribe_checkbox.isChecked(),
             "diarization":     self.diarization_checkbox.isChecked(),
+            "meeting_minutes": self.minutes_checkbox.isChecked(),
             "mic_enabled":     self.mic_checkbox.isChecked(),
             "speaker_enabled": self.speaker_checkbox.isChecked(),
             "language":        self.language_combo.currentData(),
@@ -1930,6 +2047,7 @@ class MainWindow(QWidget):
     def _apply_settings(self, s):
         self.transcribe_checkbox.setChecked(s["transcribe"])
         self.diarization_checkbox.setChecked(s["diarization"])
+        self.minutes_checkbox.setChecked(s.get("meeting_minutes", False))
         self.mic_checkbox.setChecked(s["mic_enabled"])
         self.speaker_checkbox.setChecked(s["speaker_enabled"])
         self.save_wav_checkbox.setChecked(s.get("save_wav", False))

@@ -11,6 +11,7 @@ Desktop application for automatic meeting transcription with speaker identificat
 - Audio device selection (microphone and speaker)
 - Mute microphone during recording without stopping it
 - Transcription of existing WAV files
+- Automatic Markdown meeting minutes using the GitHub Copilot SDK
 - Quick output folder access when processing is complete
 - UI preferences automatically restored on startup
 - Single instance enforcement
@@ -19,7 +20,8 @@ Desktop application for automatic meeting transcription with speaker identificat
 ## System Requirements
 
 - Windows 10/11
-- Python 3.10 or higher → [python.org](https://www.python.org/downloads/)
+- Python 3.11 or higher → [python.org](https://www.python.org/downloads/)
+- A GitHub account with access to Copilot, authenticated on this computer
 - *(optional)* NVIDIA GPU with CUDA 12.x for acceleration
 
 ## Installation
@@ -48,8 +50,9 @@ It automatically uses the `.venv` environment created by `install.bat` if presen
 1. Select the audio sources to record (**Microphone**, **Speaker**, or both)
 2. Select specific devices from the drop-down lists if needed
 3. Choose a language or leave **Auto** for automatic detection
-4. Enable **Transcription** and/or **Diarization** as needed  
+4. Enable **Transcription**, **Diarization**, and/or **Create meeting minutes with Copilot** as needed  
    > Diarization requires transcription to be enabled
+  > Meeting minutes require transcription and send the transcript to GitHub Copilot for processing
 5. Click **Start Recording**
 6. While recording you can:
    - Monitor audio levels in real time
@@ -81,7 +84,8 @@ On first launch, `config.json` is created:
     "compute_type_gpu": "int8_float16",
     "chunk_length": 30,
     "pyannote_batch_size": 16,
-    "pipeline_chunk_seconds": 10
+    "pipeline_chunk_seconds": 10,
+    "copilot_model": "auto"
 }
 ```
 
@@ -97,6 +101,13 @@ On first launch, `config.json` is created:
 | `chunk_length` | `30` | Duration in seconds of each processed audio chunk. Reduce (e.g. `15`) for audio with many short speakers |
 | `pyannote_batch_size` | `16` | Segments diarized in parallel. Increase (e.g. `32`) if VRAM allows; decrease to reduce GPU heat |
 | `pipeline_chunk_seconds` | `10` | Size in seconds of each live-transcription chunk. Lower for faster updates, higher for better throughput |
+| `copilot_model` | `"auto"` | Copilot model used for meeting minutes. `auto` lets Copilot select an available model |
+
+## Meeting minutes with Copilot
+
+When **Create meeting minutes with Copilot** is enabled, the application sends the completed transcript to the GitHub Copilot service and saves the response as Markdown. Copilot uses the GitHub account already authenticated on the computer. On first use, follow any authentication instructions shown by the Copilot runtime.
+
+The generated document includes a summary, discussion points, decisions, and action items. Review it before distribution: AI-generated minutes can omit or misinterpret details. If Copilot is unavailable, the transcript is preserved and the completion dialog reports that the minutes could not be created.
 
 ## Diarization (speaker identification)
 
@@ -130,6 +141,7 @@ Transcripts are saved in `recordings/<timestamp>/`:
 |---|---|
 | `transcript.txt` | Transcription with timestamps |
 | `transcript_diarized.txt` | Transcription with timestamps and speakers |
+| `meeting_minutes.md` | Copilot-generated meeting minutes |
 | `mixed.wav` | Recorded audio (microphone + speaker mix) |
 
 ## Project Structure

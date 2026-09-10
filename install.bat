@@ -17,7 +17,7 @@ if "%PYTHON_CMD%"=="" (
 )
 if "%PYTHON_CMD%"=="" (
     echo [ERROR] Python not found.
-    echo Download Python 3.10 or later from https://www.python.org/downloads/
+    echo Download Python 3.11 or later from https://www.python.org/downloads/
     echo Make sure to check "Add Python to PATH" during installation.
     echo.
     pause
@@ -27,6 +27,15 @@ if "%PYTHON_CMD%"=="" (
 echo Python version detected:
 %PYTHON_CMD% --version
 echo.
+
+%PYTHON_CMD% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
+if errorlevel 1 (
+    echo [ERROR] Python 3.11 or later is required by the GitHub Copilot SDK.
+    echo Download it from https://www.python.org/downloads/
+    echo.
+    pause
+    exit /b 1
+)
 
 :: Create a dedicated virtual environment so dependencies don't pollute the system Python
 if not exist "%~dp0.venv\Scripts\python.exe" (
@@ -73,6 +82,16 @@ if "%CHOICE%"=="1" (
 if errorlevel 1 (
     echo.
     echo [ERROR] Installation failed. Check your Internet connection and try again.
+    pause
+    exit /b 1
+)
+
+echo.
+echo Downloading the GitHub Copilot runtime...
+"%VENV_PY%" -m copilot download-runtime
+if errorlevel 1 (
+    echo.
+    echo [ERROR] Copilot runtime download failed. Check your Internet connection and try again.
     pause
     exit /b 1
 )

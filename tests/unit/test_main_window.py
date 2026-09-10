@@ -798,6 +798,49 @@ def test_DR_156_process_recording_emits_finished_on_success(win, tmp_path, monke
 
 
 @pytest.mark.qt
+def test_process_recording_generates_minutes_before_finished(win, tmp_path, monkeypatch):
+    """Copilot minutes are generated from the completed transcript when enabled."""
+    import numpy as np
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, dtype=np.float32))
+    fake_transcript = tmp_path / "transcript.txt"
+    fake_minutes = tmp_path / "meeting_minutes.md"
+    win.engine.process = MagicMock(return_value=fake_transcript)
+    win.minutes_generator.generate = MagicMock(return_value=fake_minutes)
+
+    finished = []
+    win.signals.finished.connect(lambda folder, path: finished.append(path))
+
+    win._process_recording(None, True, False, False, True)
+
+    win.minutes_generator.generate.assert_called_once_with(fake_transcript)
+    assert win._last_minutes_file == str(fake_minutes)
+    assert finished == [str(fake_transcript)]
+
+
+@pytest.mark.qt
+def test_minutes_failure_preserves_successful_transcript(win, tmp_path, monkeypatch):
+    """A Copilot error is non-fatal after a transcript has been saved."""
+    import numpy as np
+    monkeypatch.setattr(mt, "OUTPUT_DIR", tmp_path)
+    win.recorder.get_mixed_audio = MagicMock(return_value=np.zeros(1024, dtype=np.float32))
+    fake_transcript = tmp_path / "transcript.txt"
+    win.engine.process = MagicMock(return_value=fake_transcript)
+    win.minutes_generator.generate = MagicMock(side_effect=RuntimeError("Copilot unavailable"))
+
+    finished = []
+    errors = []
+    win.signals.finished.connect(lambda folder, path: finished.append(path))
+    win.signals.error.connect(errors.append)
+
+    win._process_recording(None, True, False, False, True)
+
+    assert finished == [str(fake_transcript)]
+    assert errors == []
+    assert win._minutes_warning == "Copilot unavailable"
+
+
+@pytest.mark.qt
 def test_DR_157_process_recording_emits_cancelled_on_cancel(win, tmp_path, monkeypatch):
     """DR-157: If cancellation was requested during processing, a cancellation
     signal is emitted carrying the folder path if a partial transcript was saved."""
