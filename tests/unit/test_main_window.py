@@ -542,13 +542,13 @@ def test_DR_145_init_pyannote_loads_pipeline_when_models_present(win_for_loading
 
 @pytest.mark.qt
 def test_DR_146_load_pipeline_sets_ready_on_success(win_for_loading):
-    """DR-146: If the pipeline loads without error, status is updated and True
-    is returned."""
-    win_for_loading.pyannote.get_pipeline = MagicMock()
+    """DR-146: If worker warmup succeeds, status is updated and True is returned."""
+    win_for_loading.engine.warmup_diarization = MagicMock()
 
     result = win_for_loading._test_load_pipeline()
 
     assert result is True
+    win_for_loading.engine.warmup_diarization.assert_called_once()
     assert "Ready" in win_for_loading.status_label.text()
 
 
@@ -556,7 +556,7 @@ def test_DR_146_load_pipeline_sets_ready_on_success(win_for_loading):
 def test_DR_147_load_pipeline_emits_error_and_returns_false_on_fail(win_for_loading):
     """DR-147: If loading raises any exception, an error dialog is requested, the
     status reflects the failure, and False is returned."""
-    win_for_loading.pyannote.get_pipeline = MagicMock(
+    win_for_loading.engine.warmup_diarization = MagicMock(
         side_effect=RuntimeError("pipeline init failed")
     )
 

@@ -795,6 +795,22 @@ def test_DR_214_run_diarization_returns_none_when_cancel_set(engine, fake_diar_w
     assert engine._diar_process is None  # forces a fresh worker on the next call
 
 
+def test_warmup_diarization_loads_pipeline_in_worker(engine, fake_diar_worker):
+    """Warmup delegates pipeline loading to the worker and waits for readiness."""
+    proc, task_q, result_q = fake_diar_worker
+    result_q.put(("ready", None))
+
+    engine.warmup_diarization()
+
+    command, audio, token, use_cuda, batch_size = task_q.get_nowait()
+    assert command == "warmup"
+    assert audio is None
+    assert token == "fake-token"
+    assert isinstance(use_cuda, bool)
+    assert batch_size == mt.PYANNOTE_BATCH
+    engine.pyannote.get_pipeline.assert_not_called()
+
+
 # ============================================================================
 # DR-254  _run_diarization() — worker restart after cancel
 # ============================================================================

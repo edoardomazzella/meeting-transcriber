@@ -757,7 +757,11 @@ def _diarization_worker_main(task_queue, result_queue, cache_dir):
         task = task_queue.get()
         if task is None:
             return
-        audio, token, use_cuda, batch_size = task
+        if len(task) == 4:
+            command = "diarize"
+            audio, token, use_cuda, batch_size = task
+        else:
+            command, audio, token, use_cuda, batch_size = task
         try:
             if pipeline is None or pipeline_on_cuda != use_cuda:
                 pipeline = Pipeline.from_pretrained(
@@ -768,6 +772,10 @@ def _diarization_worker_main(task_queue, result_queue, cache_dir):
                 if use_cuda:
                     pipeline.to(torch.device("cuda"))
                 pipeline_on_cuda = use_cuda
+
+            if command == "warmup":
+                result_queue.put(("ready", None))
+                continue
 
             if isinstance(audio, np.ndarray):
                 waveform = torch.from_numpy(audio).unsqueeze(0)  # [1, N]
@@ -932,6 +940,36 @@ class TranscriptionEngine:
         self._diar_task_q = task_q
         self._diar_result_q = result_q
 
+    def _wait_for_diarization_result(self, cancel_event=None):
+        while True:
+            if cancel_event and cancel_event.is_set():
+                self.shutdown()
+                log.info("Diarization cancelled — worker process killed immediately")
+                return None, None
+            if self._diar_process is None or not self._diar_process.is_alive():
+                if cancel_event and cancel_event.is_set():
+                    return None, None
+                self.shutdown()
+                raise RuntimeError("Diarization worker process exited unexpectedly")
+            try:
+                return self._diar_result_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+    def warmup_diarization(self):
+        """Load Pyannote once inside the persistent worker process."""
+        import torch
+        self._ensure_diarization_worker()
+        self._diar_task_q.put(
+            ("warmup", None, self.pyannote.load_token(),
+             torch.cuda.is_available(), PYANNOTE_BATCH)
+        )
+        status, payload = self._wait_for_diarization_result()
+        if status == "error":
+            raise payload
+        if status != "ready":
+            raise RuntimeError(f"Unexpected diarization worker response: {status}")
+
     def shutdown(self):
         """Terminate the diarization worker process, if running (app close)."""
         if self._diar_process is not None and self._diar_process.is_alive():
@@ -969,46 +1007,11 @@ class TranscriptionEngine:
 
         token = self.pyannote.load_token()
         self._ensure_diarization_worker()
-        self._diar_task_q.put((audio, token, use_cuda, PYANNOTE_BATCH))
+        self._diar_task_q.put(("diarize", audio, token, use_cuda, PYANNOTE_BATCH))
 
-        status = payload = None
-        while True:
-            if cancel_event and cancel_event.is_set():
-                proc = self._diar_process
-                if proc is not None and proc.is_alive():
-                    proc.kill()
-                for _q in (self._diar_task_q, self._diar_result_q):
-                    if _q is not None:
-                        try:
-                            _q.cancel_join_thread()
-                            _q.close()
-                        except Exception:
-                            pass
-                self._diar_process = None  # force a fresh worker next call
-                self._diar_task_q = None
-                self._diar_result_q = None
-                log.info("Diarization cancelled — worker process killed immediately")
-                return None
-            if self._diar_process is None or not self._diar_process.is_alive():
-                if cancel_event and cancel_event.is_set():
-                    return None
-                # Worker died without an explicit error — surface as a failure.
-                for _q in (self._diar_task_q, self._diar_result_q):
-                    if _q is not None:
-                        try:
-                            _q.cancel_join_thread()
-                            _q.close()
-                        except Exception:
-                            pass
-                self._diar_process = None
-                self._diar_task_q = None
-                self._diar_result_q = None
-                raise RuntimeError("Diarization worker process exited unexpectedly")
-            try:
-                status, payload = self._diar_result_q.get(timeout=0.1)
-                break
-            except queue.Empty:
-                continue
+        status, payload = self._wait_for_diarization_result(cancel_event)
+        if status is None:
+            return None
 
         if status == "error":
             raise payload
@@ -1497,7 +1500,7 @@ class MainWindow(QWidget):
 
     def _load_pyannote_pipeline(self):
         try:
-            self.pyannote.get_pipeline()
+            self.engine.warmup_diarization()
         except Exception as e:
             self.signals.messagebox_requested.emit("critical", "Pyannote Error", str(e))
             self.signals.status_changed.emit("Pyannote initialization failed")

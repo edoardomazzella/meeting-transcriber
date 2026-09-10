@@ -702,19 +702,19 @@ def _diarization_worker_main(task_queue, result_queue, cache_dir)
 
 Entry point for the persistent diarization worker OS process. Runs in a **separate OS process** (spawned via `multiprocessing.get_context("spawn")`) so it can be killed unconditionally and immediately on cancellation — unlike a thread, an OS process cannot be blocked by the GIL or by native C++ inference code.
 
-The pyannote pipeline is loaded once and reused across consecutive tasks; it is only reloaded when the process is respawned or when the CUDA/CPU preference changes.
+The pyannote pipeline is owned exclusively by this worker process. It is loaded during a `warmup` task and reused across consecutive `diarize` tasks; it is only reloaded when the process is respawned or when the CUDA/CPU preference changes. The GUI process does not retain another runtime pipeline instance.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `task_queue` | `multiprocessing.Queue` | Receives `(audio, token, use_cuda, batch_size)` tuples, or `None` as a shutdown sentinel |
-| `result_queue` | `multiprocessing.Queue` | Returns `("ok", annotation)` on success or `("error", exception)` on failure |
+| `task_queue` | `multiprocessing.Queue` | Receives `(command, audio, token, use_cuda, batch_size)` tuples, or `None` as a shutdown sentinel |
+| `result_queue` | `multiprocessing.Queue` | Returns `("ready", None)` after warmup, `("ok", annotation)` after diarization, or `("error", exception)` on failure |
 | `cache_dir` | `str` | Path to the pyannote model cache directory |
 
 **Behaviour per task**:
 1. Load (or reuse) the pyannote pipeline from `cache_dir`; move to GPU if `use_cuda` is `True`.
-2. Convert `audio` to a `{"waveform": torch.Tensor [1×N], "sample_rate": int}` dict — from numpy array via `torch.from_numpy().unsqueeze(0)`, or from file path via `soundfile.read()`.
-3. Call `pipeline(waveform_dict, batch_size=batch_size)` inside `torch.no_grad()`.
-4. Put `("ok", result.exclusive_speaker_diarization)` onto `result_queue` on success, or `("error", exc)` on any exception.
+2. For `warmup`, return `("ready", None)` immediately after successful loading.
+3. For `diarize`, convert `audio` to a `{"waveform": torch.Tensor [1×N], "sample_rate": int}` dict — from numpy array via `torch.from_numpy().unsqueeze(0)`, or from file path via `soundfile.read()`.
+4. Call `pipeline(waveform_dict, batch_size=batch_size)` inside `torch.no_grad()` and return `("ok", result.exclusive_speaker_diarization)`; return `("error", exc)` on any exception.
 
 The function blocks indefinitely on `task_queue.get()` between tasks; receiving `None` causes a clean return (graceful shutdown).
 
@@ -732,9 +732,15 @@ The function blocks indefinitely on `task_queue.get()` between tasks; receiving 
 def __init__(self, whisper: WhisperManager, pyannote: PyannoteManager)
 ```
 
-Receives both AI managers by dependency injection. No model loading occurs here. Initialises `_diar_process`, `_diar_task_q`, and `_diar_result_q` to `None`; these are populated lazily by `_ensure_diarization_worker()` on the first diarization call and reset to `None` by `shutdown()`.
+Receives both AI managers by dependency injection. No model loading occurs in the constructor. Initialises `_diar_process`, `_diar_task_q`, and `_diar_result_q` to `None`; these are populated by `_ensure_diarization_worker()` during startup warmup and reset to `None` by `shutdown()`.
 
 ### 6.2 Methods
+
+---
+
+#### `warmup_diarization() -> None`
+
+Starts the persistent worker if needed and sends a `warmup` command containing the token and selected CPU/CUDA mode. It waits for the worker's `ready` response. This is the only runtime pipeline initialization path used by `MainWindow`, preventing a duplicate pipeline allocation in the GUI process.
 
 ---
 
@@ -1022,7 +1028,7 @@ Handles the full pyannote setup flow: checks installation, attempts automatic do
 
 #### `_load_pyannote_pipeline() -> bool` *(background thread)*
 
-Calls `pyannote.get_pipeline()`. On failure shows a `messagebox_requested` critical dialog. Returns `True` on success.
+Calls `engine.warmup_diarization()`, which loads the pipeline exclusively inside the persistent worker process. On failure shows a `messagebox_requested` critical dialog. Returns `True` on success.
 
 **Detailed requirements**:
 
