@@ -394,7 +394,6 @@ class PyannoteManager:
         self.models_dir = self.base_dir / "pyannote"
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.token_file = self.models_dir / "token.txt"  # fallback / migration only
-        self.pipeline = None
 
         # Migrate plain-text token to keyring on first run
         if _KEYRING_AVAILABLE and self.token_file.exists():
@@ -478,28 +477,6 @@ class PyannoteManager:
             )):
                 self.delete_token()
             raise
-
-    def _initialize_pipeline(self):
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio")
-                from pyannote.audio import Pipeline
-        except ImportError:
-            raise RuntimeError("Pyannote not available.")
-        import torch
-        token = self.load_token()
-        self.pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1",
-            token=token,
-            cache_dir=str(self.models_dir),
-        )
-        if torch.cuda.is_available():
-            self.pipeline.to(torch.device("cuda"))
-
-    def get_pipeline(self):
-        if self.pipeline is None:
-            self._initialize_pipeline()
-        return self.pipeline
 
 
 # ── AudioRecorder ─────────────────────────────────────────────────────────────
