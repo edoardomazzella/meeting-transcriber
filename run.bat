@@ -1,7 +1,18 @@
 @echo off
 setlocal
+cd /d "%~dp0"
 
-:: Use py (Python Launcher) to locate pythonw.exe
+:: Prefer the project's virtual environment if present
+if exist "%~dp0.venv\Scripts\pythonw.exe" (
+    start "" "%~dp0.venv\Scripts\pythonw.exe" meeting_transcription.py
+    goto :eof
+)
+if exist "%~dp0.venv\Scripts\python.exe" (
+    start "" "%~dp0.venv\Scripts\python.exe" meeting_transcription.py
+    goto :eof
+)
+
+:: Fall back to py (Python Launcher) to locate pythonw.exe
 py --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python not found.

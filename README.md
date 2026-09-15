@@ -27,7 +27,8 @@ Desktop application for automatic meeting transcription with speaker identificat
 1. Download and install Python from [python.org](https://www.python.org/downloads/)  
    ⚠️ Check **"Add Python to PATH"** during installation
 
-2. Double-click **`install.bat`**  
+2. Double-click **`install.bat`**
+   - Creates a dedicated virtual environment in `.venv` (reused on subsequent runs)
    - Choose **1** if you have an NVIDIA GPU
    - Choose **2** to use CPU only
 
@@ -35,7 +36,8 @@ Desktop application for automatic meeting transcription with speaker identificat
 
 ## Launch
 
-Double-click **`run.bat`**
+Double-click **`run.bat`**  
+It automatically uses the `.venv` environment created by `install.bat` if present, otherwise falls back to the system Python.
 
 ---
 

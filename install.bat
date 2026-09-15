@@ -1,5 +1,6 @@
 @echo off
 setlocal
+cd /d "%~dp0"
 
 echo ============================================
 echo  Meeting Transcriber - Installer
@@ -27,6 +28,25 @@ echo Python version detected:
 %PYTHON_CMD% --version
 echo.
 
+:: Create a dedicated virtual environment so dependencies don't pollute the system Python
+if not exist "%~dp0.venv\Scripts\python.exe" (
+    echo Creating virtual environment in .venv ...
+    %PYTHON_CMD% -m venv "%~dp0.venv"
+    if errorlevel 1 (
+        echo.
+        echo [ERROR] Virtual environment creation failed.
+        pause
+        exit /b 1
+    )
+) else (
+    echo Virtual environment .venv already exists, reusing it.
+)
+set VENV_PY=%~dp0.venv\Scripts\python.exe
+
+echo.
+echo Upgrading pip...
+"%VENV_PY%" -m pip install --upgrade pip
+
 :: Ask GPU or CPU
 echo Do you have an NVIDIA GPU with CUDA?
 echo.
@@ -38,11 +58,11 @@ set /p CHOICE="Choose (1 or 2): "
 if "%CHOICE%"=="1" (
     echo.
     echo Installing GPU dependencies...
-    %PYTHON_CMD% -m pip install -r requirements-gpu.txt
+    "%VENV_PY%" -m pip install -r requirements-gpu.txt
 ) else if "%CHOICE%"=="2" (
     echo.
     echo Installing CPU dependencies...
-    %PYTHON_CMD% -m pip install -r requirements-cpu.txt
+    "%VENV_PY%" -m pip install -r requirements-cpu.txt
 ) else (
     echo.
     echo Invalid choice. Please run install.bat again.
