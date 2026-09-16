@@ -1358,7 +1358,7 @@ class MainWindow(QWidget):
         self.transcribe_checkbox = QCheckBox("Transcribe")
         self.transcribe_checkbox.setEnabled(False)
         self.transcribe_checkbox.toggled.connect(self._on_transcribe_toggled)
-        self.diarization_checkbox = QCheckBox("Enable speaker diarization")
+        self.diarization_checkbox = QCheckBox("Speaker identification")
         self.diarization_checkbox.setEnabled(False)
         self.minutes_checkbox = QCheckBox("Create MoM")
         self.minutes_checkbox.setEnabled(False)
